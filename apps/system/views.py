@@ -1,8 +1,3 @@
-# ============================================================================
-# apps/system/views.py
-# UPDATED WEBHOOK - HANDLES BOTH CLINICIAN AND PATIENT MESSAGES
-# ============================================================================
-
 import logging
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator

@@ -1,8 +1,3 @@
-# ============================================================================
-# apps/clinician/whatsapp_handler.py
-# COMPLETE WORKING CLINICIAN WHATSAPP HANDLER
-# ============================================================================
-
 import logging
 import json
 from datetime import datetime
@@ -29,9 +24,7 @@ class ClinicianWhatsAppHandler:
     def __init__(self):
         self.twilio = TwilioClient()
     
-    # ========================================================================
     # MAIN ENTRY POINT
-    # ========================================================================
     
     def process_clinician_message(self, incoming_data):
         """
@@ -127,9 +120,9 @@ class ClinicianWhatsAppHandler:
             print(f"[CLINICIAN] Error: {str(e)}", exc_info=True)
             return False
     
-    # ========================================================================
+   
     # COMMAND: HELP
-    # ========================================================================
+   
     
     def _send_help(self, clinician):
         """Send help message with all commands."""
@@ -161,9 +154,8 @@ Type *help* anytime for this message."""
         
         logger.info(f"[CLINICIAN] Sent help to {clinician.phone_number}")
     
-    # ========================================================================
     # COMMAND: PENDING
-    # ========================================================================
+   
     
     def _send_pending_assessments(self, clinician):
         """Send list of pending assessments assigned to clinician."""
@@ -213,9 +205,9 @@ Type *help* anytime for this message."""
             print(f"[CLINICIAN] Error in pending: {str(e)}", exc_info=True)
             self._send_to_clinician(clinician, "❌ Error loading pending assessments")
     
-    # ========================================================================
+   
     # COMMAND: ESCALATIONS
-    # ========================================================================
+    
     
     def _send_escalations(self, clinician):
         """Send emergency escalations."""
@@ -248,9 +240,9 @@ Type *help* anytime for this message."""
             print(f"[CLINICIAN] Error in escalations: {str(e)}")
             self._send_to_clinician(clinician, "❌ Error loading escalations")
     
-    # ========================================================================
+   
     # COMMAND: PATIENTS
-    # ========================================================================
+   
     
     def _send_active_patients(self, clinician):
         """Send list of active patients."""
@@ -287,9 +279,9 @@ Type *help* anytime for this message."""
             print(f"[CLINICIAN] Error in patients: {str(e)}")
             self._send_to_clinician(clinician, "❌ Error loading patients")
     
-    # ========================================================================
+    
     # COMMAND: APPROVE
-    # ========================================================================
+   
     
     def _handle_approve(self, clinician, args):
         """
@@ -369,9 +361,9 @@ Type *help* anytime for this message."""
             self._send_to_clinician(clinician, "❌ Error approving assessment")
             return False
     
-    # ========================================================================
+    
     # COMMAND: REJECT
-    # ========================================================================
+   
     
     def _handle_reject(self, clinician, args):
         """
@@ -440,9 +432,9 @@ Type *help* anytime for this message."""
             self._send_to_clinician(clinician, "❌ Error rejecting assessment")
             return False
     
-    # ========================================================================
+   
     # COMMAND: SEND
-    # ========================================================================
+    
     
     def _handle_send(self, clinician, args):
         """
@@ -538,9 +530,9 @@ Type *help* anytime for this message."""
             self._send_to_clinician(clinician, "❌ Error sending assessment")
             return False
     
-    # ========================================================================
+    
     # COMMAND: MESSAGE
-    # ========================================================================
+    
     
     def _handle_message(self, clinician, args):
         """
@@ -621,9 +613,9 @@ Type *help* anytime for this message."""
             self._send_to_clinician(clinician, "❌ Error sending message")
             return False
     
-    # ========================================================================
+   
     # COMMAND: STATUS
-    # ========================================================================
+    
     
     def _handle_status(self, clinician, args):
         """
@@ -689,9 +681,9 @@ Type *help* anytime for this message."""
             self._send_to_clinician(clinician, "❌ Error updating status")
             return False
     
-    # ========================================================================
+   
     # UNKNOWN COMMAND
-    # ========================================================================
+   
     
     def _send_unknown_command(self, clinician, command):
         """Handle unknown command."""
@@ -703,9 +695,9 @@ Type *help* anytime for this message."""
         
         logger.warning(f"[CLINICIAN] Unknown command: {command}")
     
-    # ========================================================================
+   
     # HELPER METHODS
-    # ========================================================================
+    
     
     def _get_clinician_by_whatsapp(self, whatsapp_id):
         """Get clinician user by WhatsApp ID."""
@@ -808,9 +800,9 @@ Type *help* anytime for this message."""
             print(f"[CLINICIAN] Error formatting message: {str(e)}", exc_info=True)
             return "Assessment sent to patient"
     
-    # ========================================================================
+   
     # NOTIFICATION METHODS
-    # ========================================================================
+   
     
     def notify_new_patient(self, clinician, conversation):
         """Notify clinician about new patient assignment"""
