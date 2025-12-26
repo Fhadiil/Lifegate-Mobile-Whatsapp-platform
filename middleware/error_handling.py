@@ -39,7 +39,7 @@ def custom_exception_handler(exc, context):
     
     else:
         # Log unexpected errors
-        logger.error(
+        print(
             f"Unhandled exception: {str(exc)}",
             exc_info=True,
             extra={'context': context}
@@ -64,7 +64,7 @@ class ErrorHandlingMiddleware:
             response = self.get_response(request)
             return response
         except Exception as e:
-            logger.error(f"Middleware error: {str(e)}", exc_info=True)
+            print(f"Middleware error: {str(e)}", exc_info=True)
             
             # Log service failure
             ServiceFailureLog.objects.create(

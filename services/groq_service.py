@@ -47,7 +47,7 @@ class GroqService:
             return response
         
         except Exception as e:
-            logger.error(f"Groq API error: {str(e)}")
+            print(f"Groq API error: {str(e)}")
             raise
     
     def generate_triage_question(self, context):

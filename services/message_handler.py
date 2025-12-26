@@ -18,30 +18,29 @@ logger = logging.getLogger('lifegate')
 class MessageHandler:
     """Main handler for incoming WhatsApp messages."""
     
-    WELCOME_MESSAGE = """🏥 *LIFEGATE MOBILE*
+    WELCOME_MESSAGE = """ *LIFEGATE MOBILE*
 _Telemedicine Platform_
 
 Welcome! 👋
 
 We connect you with qualified, licensed clinicians who can assess your symptoms and provide professional medical guidance.
 
-*⚠️ IMPORTANT - READ FIRST*
+*IMPORTANT - READ FIRST*
 
-This service is NOT for emergencies. If you're experiencing a life-threatening emergency:
-🚨 *CALL 911 IMMEDIATELY*
+This service is NOT for emergencies. If you're experiencing a life-threatening emergency or severe symptoms, please call emergency services immediately.
+
 
 *USER AGREEMENT*
 
 By clicking "GET STARTED," you agree to:
 
-✅ I am 18 years or older
 ✅ This is for health assessment only, NOT a diagnosis
 ✅ A licensed clinician will review my case
 ✅ My information is encrypted and confidential
 ✅ I understand the limitations of this service
 
 *Key Points:*
-• Response time: Usually within 4 hours
+• Response time: Usually within 10 minutes, up to 1 hour
 • All conversations are private & secure
 • Your health data is protected
 • Clinicians are licensed professionals
@@ -77,7 +76,7 @@ To continue, reply:
             # Step 1: Get or create user
             user, created = self._get_or_create_user(whatsapp_id)
             if not user:
-                logger.error(f"Failed to create user for {whatsapp_id}")
+                print(f"Failed to create user for {whatsapp_id}")
                 return False
             
             if created:
@@ -126,7 +125,7 @@ To continue, reply:
             return True
             
         except Exception as e:
-            logger.error(f"Error processing message: {str(e)}", exc_info=True)
+            print(f"Error processing message: {str(e)}", exc_info=True)
             return False
     
     def _get_or_create_user(self, whatsapp_id):
@@ -154,7 +153,7 @@ To continue, reply:
             
             return user, False
         except Exception as e:
-            logger.error(f"Error in _get_or_create_user: {str(e)}")
+            print(f"Error in _get_or_create_user: {str(e)}")
             return None, False
     
     def _get_or_create_conversation(self, user):
@@ -191,7 +190,7 @@ To continue, reply:
             
             logger.info(f"Welcome screen sent to {user.phone_number}")
         except Exception as e:
-            logger.error(f"Error sending welcome screen: {str(e)}")
+            print(f"Error sending welcome screen: {str(e)}")
     
     def _handle_acceptance(self, user, conversation, message_body):
         """Handle user agreement acceptance."""
@@ -292,7 +291,7 @@ To continue, reply:
                 self._start_ai_triage(user, conversation)
         
         except Exception as e:
-            logger.error(f"Error in profile collection: {str(e)}")
+            print(f"Error in profile collection: {str(e)}")
             self.twilio.send_message(user.whatsapp_id, "An error occurred. Please try again.")
     
     def _check_red_flags(self, text):
@@ -356,7 +355,7 @@ To continue, reply:
             
             logger.info(f"Triage started for {user.phone_number}")
         except Exception as e:
-            logger.error(f"Error starting triage: {str(e)}")
+            print(f"Error starting triage: {str(e)}")
             self.twilio.send_message(user.whatsapp_id, "An error occurred. Please try again later.")
     
     def _handle_triage_response(self, user, conversation, message_body):
@@ -403,7 +402,7 @@ To continue, reply:
             
             conversation.save()
         except Exception as e:
-            logger.error(f"Error handling triage response: {str(e)}")
+            print(f"Error handling triage response: {str(e)}")
             self.twilio.send_message(user.whatsapp_id, "An error occurred. Please try again.")
     
     def _generate_assessment(self, user, conversation):
@@ -438,12 +437,12 @@ To continue, reply:
             self.twilio.send_message(
                 user.whatsapp_id,
                 "Thank you! A clinician is reviewing your details. "
-                "You'll receive recommendations within 4 hours."
+                "You'll receive recommendations soon."
             )
             
             logger.info(f"Assessment generated for {user.phone_number}")
         except Exception as e:
-            logger.error(f"Error generating assessment: {str(e)}")
+            print(f"Error generating assessment: {str(e)}")
             self.twilio.send_message(user.whatsapp_id, "An error occurred. Please try again later.")
     
     def _assign_clinician(self, conversation):
@@ -473,8 +472,11 @@ To continue, reply:
             )
             
             # Send WhatsApp notification to clinician
-            handler = ClinicianWhatsAppHandler()
-            handler.notify_new_patient(clinician, conversation.patient)
+            try:
+                handler = ClinicianWhatsAppHandler()
+                handler.notify_new_patient(clinician, conversation)
+            except Exception as e:
+                print(f"Error notifying clinician: {str(e)}")
     
     def _handle_pending_review(self, user, conversation, message_body):
         """Handle messages while assessment is pending clinician review."""

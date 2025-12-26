@@ -43,7 +43,7 @@ class AIEngine:
             response = self.groq.call_api(system_prompt, user_prompt, max_tokens=100)
             return response.strip()
         except Exception as e:
-            logger.error(f"Error generating first question: {str(e)}")
+            print(f"Error generating first question: {str(e)}")
             return self.fallback.get_first_question(chief_complaint)
     
     def generate_next_question(self, conversation, current_response):
@@ -89,7 +89,7 @@ class AIEngine:
             response = self.groq.call_api(system_prompt, user_prompt, max_tokens=100)
             return response.strip()
         except Exception as e:
-            logger.error(f"Error generating next question: {str(e)}")
+            print(f"Error generating next question: {str(e)}")
             return self.fallback.get_next_question()
     
     def generate_assessment(self, conversation):
@@ -180,7 +180,7 @@ class AIEngine:
             return assessment
         
         except Exception as e:
-            logger.error(f"Error generating assessment: {str(e)}")
+            print(f"Error generating assessment: {str(e)}")
             return self.fallback.get_assessment(
                 chief_complaint=conversation.chief_complaint,
                 profile=profile
@@ -224,5 +224,5 @@ class AIEngine:
             
             return json.loads(response.strip())
         except (json.JSONDecodeError, IndexError) as e:
-            logger.error(f"Error parsing JSON response: {str(e)}")
+            print(f"Error parsing JSON response: {str(e)}")
             return None

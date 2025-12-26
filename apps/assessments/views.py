@@ -70,7 +70,7 @@ class AssessmentViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_200_OK)
         
         except Exception as e:
-            logger.error(f"Error listing assessments: {str(e)}")
+            print(f"Error listing assessments: {str(e)}")
             return Response(
                 {'error': 'Failed to load assessments'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -109,7 +109,7 @@ class AssessmentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            logger.error(f"Error retrieving assessment: {str(e)}")
+            print(f"Error retrieving assessment: {str(e)}")
             return Response(
                 {'error': 'Failed to load assessment'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -157,7 +157,7 @@ class AssessmentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            logger.error(f"Error acknowledging assessment: {str(e)}")
+            print(f"Error acknowledging assessment: {str(e)}")
             return Response(
                 {'error': 'Failed to acknowledge assessment'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -185,7 +185,7 @@ class AssessmentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            logger.error(f"Error getting reviews: {str(e)}")
+            print(f"Error getting reviews: {str(e)}")
             return Response(
                 {'error': 'Failed to load reviews'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -230,7 +230,7 @@ class AssessmentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            logger.error(f"Error getting summary: {str(e)}")
+            print(f"Error getting summary: {str(e)}")
             return Response(
                 {'error': 'Failed to load summary'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -284,7 +284,7 @@ class AssessmentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            logger.error(f"Error requesting follow-up: {str(e)}")
+            print(f"Error requesting follow-up: {str(e)}")
             return Response(
                 {'error': 'Failed to request follow-up'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -323,7 +323,7 @@ class AssessmentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            logger.error(f"Error getting compliance summary: {str(e)}")
+            print(f"Error getting compliance summary: {str(e)}")
             return Response(
                 {'error': 'Failed to load compliance data'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR

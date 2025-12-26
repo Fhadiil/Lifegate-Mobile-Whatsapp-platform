@@ -8,6 +8,7 @@ import json
 from datetime import datetime
 from django.utils import timezone
 from django.conf import settings
+from django.db.models import Q
 from apps.conversations.models import ConversationSession, Message
 from apps.assessments.models import AIAssessment, AssessmentReview
 from apps.clinician.models import ClinicianAvailability, PatientAssignment
@@ -92,6 +93,9 @@ class ClinicianWhatsAppHandler:
                 self._send_pending_assessments(clinician)
                 return True
             
+            elif command == 'modify':
+                return self._handle_modify(clinician, args)
+            
             elif command == 'escalations':
                 self._send_escalations(clinician)
                 return True
@@ -120,7 +124,7 @@ class ClinicianWhatsAppHandler:
                 return True
             
         except Exception as e:
-            logger.error(f"[CLINICIAN] Error: {str(e)}", exc_info=True)
+            print(f"[CLINICIAN] Error: {str(e)}", exc_info=True)
             return False
     
     # ========================================================================
@@ -153,7 +157,7 @@ class ClinicianWhatsAppHandler:
 
 Type *help* anytime for this message."""
         
-        self.twilio.send_message(clinician.whatsapp_id, message)
+        self._send_to_clinician(clinician, message)
         
         logger.info(f"[CLINICIAN] Sent help to {clinician.phone_number}")
     
@@ -165,23 +169,23 @@ Type *help* anytime for this message."""
         """Send list of pending assessments assigned to clinician."""
         
         try:
-            pending = AIAssessment.objects.filter(
+            qs = AIAssessment.objects.filter(
                 conversation__assigned_clinician=clinician,
                 status__in=['GENERATED', 'PENDING_REVIEW']
-            ).select_related(
-                'patient',
-                'conversation'
-            ).order_by('-generated_at')[:5]
-            
-            logger.info(f"[CLINICIAN] Found {pending.count()} pending for {clinician.phone_number}")
-            
-            if not pending:
+            ).select_related('patient', 'conversation').order_by('-generated_at')
+
+            total = qs.count()
+            logger.info(f"[CLINICIAN] Found {total} pending for {clinician.phone_number}")
+
+            if total == 0:
                 message = "✅ *NO PENDING ASSESSMENTS*\n\nGreat work! No pending reviews."
-                self.twilio.send_message(clinician.whatsapp_id, message)
+                self._send_to_clinician(clinician, message)
                 return
-            
-            message = "📋 *PENDING ASSESSMENTS* ({} total)\n\n".format(pending.count())
-            
+
+            message = "📋 *PENDING ASSESSMENTS* ({} total)\n\n".format(total)
+
+            pending = qs[:5]
+
             for idx, assessment in enumerate(pending, 1):
                 severity = assessment.symptoms_overview.get('severity_rating', 5) if assessment.symptoms_overview else 5
                 confidence = int(assessment.confidence_score * 100) if assessment.confidence_score else 0
@@ -201,13 +205,13 @@ Type *help* anytime for this message."""
             message += "reject <id> - Reject\n"
             message += "send <id> - Send to patient"
             
-            self.twilio.send_message(clinician.whatsapp_id, message)
+            self._send_to_clinician(clinician, message)
             
             logger.info(f"[CLINICIAN] Sent pending list to {clinician.phone_number}")
         
         except Exception as e:
-            logger.error(f"[CLINICIAN] Error in pending: {str(e)}", exc_info=True)
-            self.twilio.send_message(clinician.whatsapp_id, "❌ Error loading pending assessments")
+            print(f"[CLINICIAN] Error in pending: {str(e)}", exc_info=True)
+            self._send_to_clinician(clinician, "❌ Error loading pending assessments")
     
     # ========================================================================
     # COMMAND: ESCALATIONS
@@ -224,7 +228,7 @@ Type *help* anytime for this message."""
             
             if not escalations:
                 message = "✅ *NO ESCALATIONS*\n\nAll patients are stable."
-                self.twilio.send_message(clinician.whatsapp_id, message)
+                self._send_to_clinician(clinician, message)
                 return
             
             message = "🚨 *EMERGENCY ALERTS* ({} total)\n\n".format(escalations.count())
@@ -236,13 +240,13 @@ Type *help* anytime for this message."""
                 message += f"   {escalation.alert_message[:60]}\n"
                 message += f"   Status: {escalation.alert_status}\n\n"
             
-            self.twilio.send_message(clinician.whatsapp_id, message)
+            self._send_to_clinician(clinician, message)
             
             logger.info(f"[CLINICIAN] Sent escalations to {clinician.phone_number}")
         
         except Exception as e:
-            logger.error(f"[CLINICIAN] Error in escalations: {str(e)}")
-            self.twilio.send_message(clinician.whatsapp_id, "❌ Error loading escalations")
+            print(f"[CLINICIAN] Error in escalations: {str(e)}")
+            self._send_to_clinician(clinician, "❌ Error loading escalations")
     
     # ========================================================================
     # COMMAND: PATIENTS
@@ -262,7 +266,7 @@ Type *help* anytime for this message."""
             
             if not assignments:
                 message = "👥 *NO ACTIVE PATIENTS*\n\nCheck back soon!"
-                self.twilio.send_message(clinician.whatsapp_id, message)
+                self._send_to_clinician(clinician, message)
                 return
             
             message = "👥 *YOUR ACTIVE PATIENTS* ({} total)\n\n".format(assignments.count())
@@ -275,13 +279,13 @@ Type *help* anytime for this message."""
                 message += f"   {chief}\n"
                 message += f"   Assigned: {assignment.assigned_at.strftime('%H:%M')}\n\n"
             
-            self.twilio.send_message(clinician.whatsapp_id, message)
+            self._send_to_clinician(clinician, message)
             
             logger.info(f"[CLINICIAN] Sent patients to {clinician.phone_number}")
         
         except Exception as e:
-            logger.error(f"[CLINICIAN] Error in patients: {str(e)}")
-            self.twilio.send_message(clinician.whatsapp_id, "❌ Error loading patients")
+            print(f"[CLINICIAN] Error in patients: {str(e)}")
+            self._send_to_clinician(clinician, "❌ Error loading patients")
     
     # ========================================================================
     # COMMAND: APPROVE
@@ -345,13 +349,13 @@ Type *help* anytime for this message."""
             message += f"👉 Next: send {str(assessment.id)[:12]}\n"
             message += f"(This sends assessment to patient)"
             
-            self.twilio.send_message(clinician.whatsapp_id, message)
+            self._send_to_clinician(clinician, message)
             
             logger.info(f"[CLINICIAN] Approved {assessment.id}")
             return True
         
         except AIAssessment.DoesNotExist:
-            logger.error(f"[CLINICIAN] Assessment not found: {args}")
+            print(f"[CLINICIAN] Assessment not found: {args}")
             self.twilio.send_message(
                 clinician.whatsapp_id,
                 "❌ Assessment not found\n\n"
@@ -361,8 +365,8 @@ Type *help* anytime for this message."""
             return False
         
         except Exception as e:
-            logger.error(f"[CLINICIAN] Error in approve: {str(e)}", exc_info=True)
-            self.twilio.send_message(clinician.whatsapp_id, "❌ Error approving assessment")
+            print(f"[CLINICIAN] Error in approve: {str(e)}", exc_info=True)
+            self._send_to_clinician(clinician, "❌ Error approving assessment")
             return False
     
     # ========================================================================
@@ -419,7 +423,7 @@ Type *help* anytime for this message."""
             message += f"Patient: {assessment.patient.phone_number}\n\n"
             message += "Patient will be asked for more information."
             
-            self.twilio.send_message(clinician.whatsapp_id, message)
+            self._send_to_clinician(clinician, message)
             
             logger.info(f"[CLINICIAN] Rejected {assessment.id}")
             return True
@@ -432,8 +436,8 @@ Type *help* anytime for this message."""
             return False
         
         except Exception as e:
-            logger.error(f"[CLINICIAN] Error in reject: {str(e)}", exc_info=True)
-            self.twilio.send_message(clinician.whatsapp_id, "❌ Error rejecting assessment")
+            print(f"[CLINICIAN] Error in reject: {str(e)}", exc_info=True)
+            self._send_to_clinician(clinician, "❌ Error rejecting assessment")
             return False
     
     # ========================================================================
@@ -516,13 +520,13 @@ Type *help* anytime for this message."""
             message += f"Status: SENT\n\n"
             message += f"Patient can now reply with questions."
             
-            self.twilio.send_message(clinician.whatsapp_id, message)
+            self._send_to_clinician(clinician, message)
             
             logger.info(f"[CLINICIAN] Sent {assessment.id}")
             return True
         
         except AIAssessment.DoesNotExist:
-            logger.error(f"[CLINICIAN] Assessment not found: {args}")
+            print(f"[CLINICIAN] Assessment not found: {args}")
             self.twilio.send_message(
                 clinician.whatsapp_id,
                 "❌ Assessment not found\n\nCheck: pending"
@@ -530,8 +534,8 @@ Type *help* anytime for this message."""
             return False
         
         except Exception as e:
-            logger.error(f"[CLINICIAN] Error in send: {str(e)}", exc_info=True)
-            self.twilio.send_message(clinician.whatsapp_id, "❌ Error sending assessment")
+            print(f"[CLINICIAN] Error in send: {str(e)}", exc_info=True)
+            self._send_to_clinician(clinician, "❌ Error sending assessment")
             return False
     
     # ========================================================================
@@ -605,7 +609,7 @@ Type *help* anytime for this message."""
             return True
         
         except ConversationSession.DoesNotExist:
-            logger.error(f"[CLINICIAN] Conversation not found: {args}")
+            print(f"[CLINICIAN] Conversation not found: {args}")
             self.twilio.send_message(
                 clinician.whatsapp_id,
                 "❌ Conversation not found"
@@ -613,8 +617,8 @@ Type *help* anytime for this message."""
             return False
         
         except Exception as e:
-            logger.error(f"[CLINICIAN] Error in message: {str(e)}", exc_info=True)
-            self.twilio.send_message(clinician.whatsapp_id, "❌ Error sending message")
+            print(f"[CLINICIAN] Error in message: {str(e)}", exc_info=True)
+            self._send_to_clinician(clinician, "❌ Error sending message")
             return False
     
     # ========================================================================
@@ -681,8 +685,8 @@ Type *help* anytime for this message."""
             return True
         
         except Exception as e:
-            logger.error(f"[CLINICIAN] Error in status: {str(e)}", exc_info=True)
-            self.twilio.send_message(clinician.whatsapp_id, "❌ Error updating status")
+            print(f"[CLINICIAN] Error in status: {str(e)}", exc_info=True)
+            self._send_to_clinician(clinician, "❌ Error updating status")
             return False
     
     # ========================================================================
@@ -695,7 +699,7 @@ Type *help* anytime for this message."""
         message = f"❓ Unknown command: *{command}*\n\n"
         message += "Type *help* to see all commands"
         
-        self.twilio.send_message(clinician.whatsapp_id, message)
+        self._send_to_clinician(clinician, message)
         
         logger.warning(f"[CLINICIAN] Unknown command: {command}")
     
@@ -705,16 +709,31 @@ Type *help* anytime for this message."""
     
     def _get_clinician_by_whatsapp(self, whatsapp_id):
         """Get clinician user by WhatsApp ID."""
-        
         try:
-            user = User.objects.get(
-                whatsapp_id=whatsapp_id,
-                role='CLINICIAN'
-            )
+            if not whatsapp_id:
+                return None
+
+            # Normalize incoming id: accept both 'whatsapp:+123' and '+123'
+            raw = whatsapp_id[9:] if whatsapp_id.startswith('whatsapp:') else whatsapp_id
+
+            user = User.objects.filter(role='CLINICIAN').filter(
+                Q(whatsapp_id=whatsapp_id) | Q(whatsapp_id=raw) | Q(phone_number=raw)
+            ).first()
+
+            if not user:
+                logger.warning(f"[CLINICIAN] Not found: {whatsapp_id}")
             return user
-        except User.DoesNotExist:
-            logger.warning(f"[CLINICIAN] Not found: {whatsapp_id}")
+        except Exception as e:
+            print(f"[CLINICIAN] Error looking up clinician: {str(e)}")
             return None
+
+    def _send_to_clinician(self, clinician, message):
+        """Send WhatsApp message to clinician, falling back to phone number."""
+        try:
+            to_whatsapp = clinician.whatsapp_id or clinician.phone_number
+            self.twilio.send_message(to_whatsapp, message)
+        except Exception as e:
+            print(f"[CLINICIAN] Error sending to clinician: {str(e)}", exc_info=True)
     
     def _format_assessment_message(self, assessment, clinician):
         """Format assessment as beautiful WhatsApp message."""
@@ -786,7 +805,7 @@ Type *help* anytime for this message."""
             return message
         
         except Exception as e:
-            logger.error(f"[CLINICIAN] Error formatting message: {str(e)}", exc_info=True)
+            print(f"[CLINICIAN] Error formatting message: {str(e)}", exc_info=True)
             return "Assessment sent to patient"
     
     # ========================================================================
@@ -794,17 +813,18 @@ Type *help* anytime for this message."""
     # ========================================================================
     
     def notify_new_patient(self, clinician, conversation):
-        """Notify clinician about new patient assignment."""
-        
+        """Notify clinician about new patient assignment"""
+    
         try:
             patient = conversation.patient
             
             message = f"🆕 *NEW PATIENT ASSIGNMENT*\n\n"
             message += f"Patient: {patient.phone_number}\n"
-            message += f"Chief Complaint: {conversation.chief_complaint[:50]}\n\n"
+            message += f"Name: {patient.first_name or 'N/A'} {patient.last_name or 'N/A'}\n"
+            message += f"Chief Complaint: {conversation.chief_complaint[:60]}\n\n"
             message += "👉 *ACTIONS:*\n"
             message += "pending - View pending assessments\n"
-            message += "approve <id> - Approve\n"
+            message += "approve <id> - Approve assessment\n"
             message += "send <id> - Send to patient"
             
             self.twilio.send_message(clinician.whatsapp_id, message)
@@ -812,7 +832,31 @@ Type *help* anytime for this message."""
             logger.info(f"[CLINICIAN] Notified new patient: {clinician.phone_number}")
         
         except Exception as e:
-            logger.error(f"[CLINICIAN] Error notifying: {str(e)}")
+            print(f"[CLINICIAN] Error notifying: {str(e)}", exc_info=True)
+
+
+    def notify_patient_message(self, clinician, conversation, patient_message):
+        """Notify clinician when patient sends a message"""
+        
+        try:
+            patient = conversation.patient
+            
+            message = f"💬 *NEW MESSAGE FROM PATIENT*\n\n"
+            message += f"Patient: {patient.phone_number}\n"
+            message += f"Name: {patient.first_name or 'N/A'}\n\n"
+            message += f"Message:\n\"{patient_message}\"\n\n"
+            message += "👉 *REPLY VIA WHATSAPP:*\n"
+            message += f"message {str(conversation.id)[:12]} <your message>\n\n"
+            message += "Example:\n"
+            message += "message abc-123 Take medicine with food"
+            
+            self.twilio.send_message(clinician.whatsapp_id, message)
+            
+            logger.info(f"[CLINICIAN] Notified about patient message: {clinician.phone_number}")
+        
+        except Exception as e:
+            print(f"[CLINICIAN] Error notifying: {str(e)}", exc_info=True)
+
     
     def notify_escalation(self, clinician, escalation):
         """Notify clinician about emergency escalation."""
@@ -827,9 +871,71 @@ Type *help* anytime for this message."""
             message += f"Severity: {escalation.alert_severity}\n\n"
             message += "Please respond immediately."
             
-            self.twilio.send_message(clinician.whatsapp_id, message)
+            self._send_to_clinician(clinician, message)
             
             logger.info(f"[CLINICIAN] Notified escalation: {clinician.phone_number}")
         
         except Exception as e:
-            logger.error(f"[CLINICIAN] Error notifying escalation: {str(e)}")
+            print(f"[CLINICIAN] Error notifying escalation: {str(e)}")
+            
+    def _handle_modify(self, clinician, args):
+        """
+        MODIFY ASSESSMENT - Interactive modification workflow
+        
+        Usage: modify <assessment_id>
+        
+        Then responds to prompts:
+        1. Ask for modified recommendations
+        2. Ask for modified medications
+        3. Ask for clinician notes
+        4. Creates modification and auto-approves
+        """
+        
+        try:
+            if not args.strip():
+                self.twilio.send_message(
+                    clinician.whatsapp_id,
+                    "❌ *USAGE:* modify <assessment_id>\n\n"
+                    "Example: modify abc-123"
+                )
+                return False
+            
+            assessment_id = args.split()[0]
+            
+            logger.info(f"[CLINICIAN] Modify: {assessment_id}")
+            
+            # Find assessment
+            assessment = AIAssessment.objects.get(
+                id__startswith=assessment_id,
+                conversation__assigned_clinician=clinician
+            )
+            
+            # Store in session (using conversation.id as key for now)
+            # For now, show the modification UI on dashboard instead
+            
+            message = f"📝 *MODIFY ASSESSMENT*\n\n"
+            message += f"Patient: {assessment.patient.phone_number}\n"
+            message += f"Chief: {assessment.chief_complaint[:50]}\n\n"
+            message += "⚠️ For detailed modifications, use the WEB DASHBOARD:\n"
+            message += "👉 http://localhost:3000/\n\n"
+            message += "On dashboard:\n"
+            message += "1. Click 'Review' on this assessment\n"
+            message += "2. Click 'MODIFY'\n"
+            message += "3. Edit recommendations & medications\n"
+            message += "4. Submit\n\n"
+            message += "Or use WhatsApp for quick approval:\n"
+            message += f"approve {str(assessment.id)[:12]}"
+            
+            self.twilio.send_message(clinician.whatsapp_id, message)
+            
+            logger.info(f"[CLINICIAN] Sent modify instructions")
+            return True
+        
+        except AIAssessment.DoesNotExist:
+            self.twilio.send_message(clinician.whatsapp_id, "❌ Assessment not found")
+            return False
+        
+        except Exception as e:
+            print(f"[CLINICIAN] Error in modify: {str(e)}", exc_info=True)
+            self.twilio.send_message(clinician.whatsapp_id, "❌ Error")
+            return False

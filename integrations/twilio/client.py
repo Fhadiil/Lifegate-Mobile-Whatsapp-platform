@@ -30,12 +30,12 @@ class TwilioClient:
     def send_message(self, to_whatsapp_id, message_body):
         """Send standard text message."""
         if not self.client:
-            logger.error("Twilio client not configured")
+            print("Twilio client not configured")
             return None
             
         # 1. FIX: Check for None BEFORE doing anything else
         if not to_whatsapp_id:
-            logger.error("Attempted to send message to None/Empty number")
+            print("Attempted to send message to None/Empty number")
             return None
 
         # 2. FIX: Standardize the prefix
@@ -53,7 +53,7 @@ class TwilioClient:
             return message.sid
 
         except Exception as e:
-            logger.error(f"Error sending WhatsApp message: {str(e)}")
+            print(f"Error sending WhatsApp message: {str(e)}")
             return None
 
     def send_message_with_buttons(self, to_whatsapp_id, message_body, buttons):
@@ -104,7 +104,7 @@ class TwilioClient:
             return message.sid
 
         except Exception as e:
-            logger.error(f"Error sending button message: {str(e)}")
+            print(f"Error sending button message: {str(e)}")
             # Fallback to text if buttons fail
             fallback_txt = message_body + "\n\nReply: " + ", ".join([b['title'] for b in buttons])
             return self.send_message(to_whatsapp_id, fallback_txt)
@@ -129,7 +129,7 @@ class TwilioClient:
             logger.info(f"Media message sent: {message.sid}")
             return message.sid
         except Exception as e:
-            logger.error(f"Error sending media message: {str(e)}")
+            print(f"Error sending media message: {str(e)}")
             return None
     
     def validate_request(self, request_url, post_params, signature):
@@ -138,7 +138,7 @@ class TwilioClient:
         try:
             return self.validator.validate(request_url, post_params, signature)
         except Exception as e:
-            logger.error(f"Error validating signature: {str(e)}")
+            print(f"Error validating signature: {str(e)}")
             return False
 
     def is_configured(self):

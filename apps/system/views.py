@@ -108,14 +108,14 @@ class TwilioWebhookView(APIView):
                     status=status.HTTP_200_OK
                 )
             else:
-                logger.error(f"[WEBHOOK] Failed to process message")
+                print(f"[WEBHOOK] Failed to process message")
                 return Response(
                     {'status': 'error', 'message': 'Failed to process'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
         
         except Exception as e:
-            logger.error(f"[WEBHOOK] Exception: {str(e)}", exc_info=True)
+            print(f"[WEBHOOK] Exception: {str(e)}", exc_info=True)
             return Response(
                 {'status': 'error', 'message': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -148,7 +148,7 @@ class HealthCheckView(APIView):
             return Response(health, status=status.HTTP_200_OK)
         
         except Exception as e:
-            logger.error(f"[HEALTH] Health check failed: {str(e)}")
+            print(f"[HEALTH] Health check failed: {str(e)}")
             return Response(
                 {'status': 'unhealthy', 'error': str(e)},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE

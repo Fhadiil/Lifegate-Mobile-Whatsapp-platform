@@ -88,7 +88,7 @@ class ClinicianDashboardViewSet(viewsets.ViewSet):
             return Response(dashboard, status=status.HTTP_200_OK)
         
         except Exception as e:
-            logger.error(f"Error in dashboard: {str(e)}")
+            print(f"Error in dashboard: {str(e)}")
             return Response(
                 {'error': 'Failed to load dashboard'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -116,7 +116,7 @@ class ClinicianDashboardViewSet(viewsets.ViewSet):
             })
         
         except Exception as e:
-            logger.error(f"Error getting queue: {str(e)}")
+            print(f"Error getting queue: {str(e)}")
             return Response(
                 {'error': 'Failed to load queue'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -150,7 +150,7 @@ class ClinicianDashboardViewSet(viewsets.ViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            logger.error(f"Error getting assessment: {str(e)}")
+            print(f"Error getting assessment: {str(e)}")
             return Response(
                 {'error': 'Failed to load assessment'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -158,7 +158,8 @@ class ClinicianDashboardViewSet(viewsets.ViewSet):
     
     @action(detail=True, methods=['post'])
     def review_assessment(self, request, pk=None):
-        """POST /api/v1/clinician/assessments/{id}/review/ - Review and approve/modify/reject."""
+        """POST /api/v1/clinician/assessments/{id}/review/"""
+        
         try:
             assessment = AIAssessment.objects.get(
                 id=pk,
@@ -166,6 +167,7 @@ class ClinicianDashboardViewSet(viewsets.ViewSet):
             )
             
             action_type = request.data.get('action')  # APPROVED, MODIFIED, REJECTED
+            
             if action_type not in ['APPROVED', 'MODIFIED', 'REJECTED']:
                 return Response(
                     {'error': 'Invalid action'},
@@ -181,12 +183,14 @@ class ClinicianDashboardViewSet(viewsets.ViewSet):
                 clinician_risk_level=request.data.get('risk_level', 'MODERATE')
             )
             
-            # If modified, store modifications
+            # If modified, save modifications
             if action_type == 'MODIFIED':
                 review.modified_recommendations = request.data.get('modified_recommendations')
                 review.modified_otc_suggestions = request.data.get('modified_otc_suggestions')
                 review.modified_monitoring_advice = request.data.get('modified_monitoring_advice')
                 review.save()
+                
+                logger.info(f"✅ Assessment modified")
             
             # Update assessment status
             assessment.status = action_type
@@ -196,19 +200,33 @@ class ClinicianDashboardViewSet(viewsets.ViewSet):
             AuditLog.objects.create(
                 user=request.user,
                 action_type='ASSESSMENT_REVIEWED',
-                resource_type='Assessment',
+                resource_type='AIAssessment',
                 resource_id=str(pk),
                 description=f"Clinician {action_type} assessment",
                 changes={'action': action_type}
             )
             
-            # Log clinician action
-            ClinicianAction.objects.create(
-                clinician=request.user,
-                conversation=assessment.conversation,
-                action_type=f'ASSESSMENT_{action_type}',
-                action_details={'assessment_id': str(pk)}
-            )
+            # Send WhatsApp notification to clinician
+            try:
+                from apps.clinician.whatsapp_handler import ClinicianWhatsAppHandler
+                handler = ClinicianWhatsAppHandler()
+                
+                if action_type == 'APPROVED':
+                    handler.twilio.send_message(
+                        request.user.whatsapp_id,
+                        f"✅ Assessment approved!\n\n"
+                        f"Next: send {str(assessment.id)[:12]}\n"
+                        f"(to send to patient)"
+                    )
+                elif action_type == 'MODIFIED':
+                    handler.twilio.send_message(
+                        request.user.whatsapp_id,
+                        f"✏️ Assessment modified!\n\n"
+                        f"Next: send {str(assessment.id)[:12]}\n"
+                        f"(to send modified version)"
+                    )
+            except Exception as e:
+                print(f"Error notifying: {str(e)}")
             
             serializer = AssessmentReviewSerializer(review)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -219,7 +237,7 @@ class ClinicianDashboardViewSet(viewsets.ViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            logger.error(f"Error reviewing assessment: {str(e)}")
+            print(f"Error reviewing assessment: {str(e)}")
             return Response(
                 {'error': 'Failed to review assessment'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -289,7 +307,7 @@ class ClinicianDashboardViewSet(viewsets.ViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            logger.error(f"Error sending assessment: {str(e)}")
+            print(f"Error sending assessment: {str(e)}")
             return Response(
                 {'error': 'Failed to send assessment'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -345,7 +363,7 @@ class ClinicianDashboardViewSet(viewsets.ViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            logger.error(f"Error sending message: {str(e)}")
+            print(f"Error sending message: {str(e)}")
             return Response(
                 {'error': 'Failed to send message'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -370,7 +388,7 @@ class ClinicianDashboardViewSet(viewsets.ViewSet):
             return Response(serializer.data, status=status.HTTP_200_OK)
         
         except Exception as e:
-            logger.error(f"Error updating availability: {str(e)}")
+            print(f"Error updating availability: {str(e)}")
             return Response(
                 {'error': 'Failed to update availability'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -399,7 +417,7 @@ class ClinicianDashboardViewSet(viewsets.ViewSet):
             ])
         
         except Exception as e:
-            logger.error(f"Error getting escalations: {str(e)}")
+            print(f"Error getting escalations: {str(e)}")
             return Response(
                 {'error': 'Failed to load escalations'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR

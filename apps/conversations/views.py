@@ -67,7 +67,7 @@ class ConversationViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_200_OK)
         
         except Exception as e:
-            logger.error(f"Error listing conversations: {str(e)}")
+            print(f"Error listing conversations: {str(e)}")
             return Response(
                 {'error': 'Failed to load conversations'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -99,7 +99,7 @@ class ConversationViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            logger.error(f"Error retrieving conversation: {str(e)}")
+            print(f"Error retrieving conversation: {str(e)}")
             return Response(
                 {'error': 'Failed to load conversation'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -128,7 +128,7 @@ class ConversationViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            logger.error(f"Error getting messages: {str(e)}")
+            print(f"Error getting messages: {str(e)}")
             return Response(
                 {'error': 'Failed to load messages'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -136,31 +136,94 @@ class ConversationViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'])
     def send_message(self, request, pk=None):
-        """Send message - notify clinician if patient message"""
+        """POST /api/v1/conversations/{id}/messages/ - Send message in conversation"""
         
-        conversation = self.get_queryset().get(id=pk)
-        message_body = request.data.get('message')
-        
-        # Save message
-        message = Message.objects.create(
-            conversation=conversation,
-            sender=request.user,
-            message_type='PATIENT',
-            content=message_body,
-            delivery_status='DELIVERED'
-        )
-        
-        # If patient message, notify clinician
-        if request.user.role == 'PATIENT' and conversation.assigned_clinician:
-            from apps.clinician.whatsapp_handler import ClinicianWhatsAppHandler
-            handler = ClinicianWhatsAppHandler()
-            handler.notify_patient_message(
-                conversation.assigned_clinician,
-                conversation,
-                message_body
+        try:
+            conversation = self.get_queryset().get(id=pk)
+            
+            message_body = request.data.get('message', '').strip()
+            if not message_body:
+                return Response(
+                    {'error': 'Message cannot be empty'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Create message record
+            message = Message.objects.create(
+                conversation=conversation,
+                sender=request.user,
+                message_type='PATIENT' if request.user.role == 'PATIENT' else 'CLINICIAN',
+                content=message_body,
+                delivery_status='PENDING'
             )
+            
+            # ========== NEW: HANDLE PATIENT MESSAGES ==========
+            if request.user.role == 'PATIENT':
+                # Patient sent message
+                
+                if conversation.status in ['PENDING_CLINICIAN_REVIEW', 'DIRECT_MESSAGING']:
+                    # Just save, don't send anywhere (yet)
+                    message.delivery_status = 'DELIVERED'
+                    message.save()
+                    
+                    # ========== NOTIFY CLINICIAN ON WHATSAPP ==========
+                    if conversation.assigned_clinician:
+                        try:
+                            from apps.clinician.whatsapp_handler import ClinicianWhatsAppHandler
+                            handler = ClinicianWhatsAppHandler()
+                            handler.notify_patient_message(
+                                conversation.assigned_clinician,
+                                conversation,
+                                message_body
+                            )
+                            logger.info(f"✅ Notified clinician about patient message")
+                        except Exception as e:
+                            print(f"Error notifying clinician: {str(e)}")
+                    # ================================================
+                    
+                    return Response({
+                        'status': 'Message saved',
+                        'message_id': str(message.id)
+                    }, status=status.HTTP_201_CREATED)
+            
+            # ========== CLINICIAN SENDING MESSAGE ==========
+            elif request.user.role == 'CLINICIAN':
+                # Clinician sent message - send to patient via WhatsApp
+                if conversation.assigned_clinician == request.user:
+                    try:
+                        twilio = TwilioClient()
+                        twilio.send_message(conversation.patient.whatsapp_id, message_body)
+                        message.delivery_status = 'SENT'
+                        message.save()
+                    except Exception as e:
+                        print(f"Error sending to patient: {str(e)}")
+                        message.delivery_status = 'FAILED'
+                        message.save()
+            # ================================================
+            
+            # Log
+            AuditLog.objects.create(
+                user=request.user,
+                action_type='MESSAGE_SENT',
+                resource_type='Message',
+                resource_id=str(message.id),
+                description=f"Message sent in conversation"
+            )
+            
+            serializer = MessageSerializer(message)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
         
-        return Response({'status': 'Message saved'})
+        except ConversationSession.DoesNotExist:
+            return Response(
+                {'error': 'Conversation not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            print(f"Error sending message: {str(e)}")
+            return Response(
+                {'error': 'Failed to send message'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
     
     @action(detail=True, methods=['get'])
     def triage_questions(self, request, pk=None):
@@ -191,7 +254,7 @@ class ConversationViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            logger.error(f"Error getting triage questions: {str(e)}")
+            print(f"Error getting triage questions: {str(e)}")
             return Response(
                 {'error': 'Failed to load triage questions'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -234,7 +297,7 @@ class ConversationViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            logger.error(f"Error closing conversation: {str(e)}")
+            print(f"Error closing conversation: {str(e)}")
             return Response(
                 {'error': 'Failed to close conversation'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -266,7 +329,7 @@ class ConversationViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            logger.error(f"Error getting assessment: {str(e)}")
+            print(f"Error getting assessment: {str(e)}")
             return Response(
                 {'error': 'Failed to load assessment'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
