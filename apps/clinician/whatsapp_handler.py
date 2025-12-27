@@ -191,7 +191,14 @@ Type *help* anytime for this message."""
                 message += f"   {chief}\n"
                 message += f"   {severity_emoji} Severity: {severity}/10 | Confidence: {confidence}%\n"
                 message += f"   ID: {str(assessment.id)[:12]}\n\n"
-            
+                # Append full AI assessment content so clinician can review before approving
+                try:
+                    detailed = self._format_assessment_for_clinician(assessment, clinician)
+                    message += "*FULL ASSESSMENT (review before approving):*\n"
+                    message += detailed + "\n\n"
+                except Exception:
+                    logger.exception("[CLINICIAN] Failed to format detailed assessment")
+
             message += "👉 *ACTIONS:*\n"
             message += "approve <id> - Approve\n"
             message += "reject <id> - Reject\n"
@@ -799,6 +806,104 @@ Type *help* anytime for this message."""
         except Exception as e:
             print(f"[CLINICIAN] Error formatting message: {str(e)}", exc_info=True)
             return "Assessment sent to patient"
+
+    def _format_assessment_for_clinician(self, assessment, clinician):
+        """Format AI assessment details for clinician review (not patient-facing)."""
+        try:
+            parts = []
+
+            gen_at = getattr(assessment, 'generated_at', None)
+            gen_str = gen_at.strftime('%Y-%m-%d %H:%M') if gen_at else 'Unknown'
+            confidence = int(assessment.confidence_score * 100) if getattr(assessment, 'confidence_score', None) else 0
+
+            parts.append(f"ID: {str(assessment.id)}")
+            parts.append(f"Generated: {gen_str} | Confidence: {confidence}%")
+            parts.append(f"Patient: {assessment.patient.first_name or assessment.patient.phone_number}")
+            parts.append(f"Chief complaint: {assessment.chief_complaint}")
+
+            # Symptoms
+            symptoms = assessment.symptoms_overview or {}
+            primary = symptoms.get('primary_symptoms', []) if isinstance(symptoms, dict) else []
+            severity = symptoms.get('severity_rating') if isinstance(symptoms, dict) else None
+            duration = symptoms.get('duration') if isinstance(symptoms, dict) else None
+            if primary:
+                parts.append("\nSymptoms:")
+                for s in primary:
+                    parts.append(f" - {s}")
+            if severity is not None or duration:
+                parts.append(f"Severity: {severity or 'N/A'} | Duration: {duration or 'N/A'}")
+
+            # Key observations / likely condition
+            ko = assessment.key_observations or {}
+            likely = ko.get('likely_condition') if isinstance(ko, dict) else None
+            differential = ko.get('differential_diagnoses') if isinstance(ko, dict) else None
+            if likely:
+                parts.append("\nKey observations / Likely condition:")
+                parts.append(f"{likely}")
+            if differential:
+                parts.append("Differential diagnoses:")
+                if isinstance(differential, (list, tuple)):
+                    for d in differential[:5]:
+                        parts.append(f" - {d}")
+                else:
+                    parts.append(str(differential))
+
+            # Preliminary recommendations
+            recs = assessment.preliminary_recommendations or {}
+            if recs:
+                parts.append("\nPreliminary recommendations:")
+                # show structured keys if present
+                for k, v in recs.items():
+                    if isinstance(v, (list, tuple)):
+                        parts.append(f"{k}:")
+                        for item in v[:5]:
+                            parts.append(f" - {item}")
+                    else:
+                        parts.append(f"{k}: {v}")
+
+            # OTC / medication suggestions
+            meds = assessment.otc_suggestions or {}
+            if meds:
+                parts.append("\nOTC / medication suggestions:")
+                meds_list = meds.get('medications') if isinstance(meds, dict) else meds
+                if isinstance(meds_list, (list, tuple)):
+                    for m in meds_list[:6]:
+                        if isinstance(m, dict):
+                            parts.append(f" - {m.get('name', 'med')}: {m.get('dosage','')} {m.get('frequency','')}")
+                        else:
+                            parts.append(f" - {m}")
+                else:
+                    parts.append(str(meds_list))
+
+            # Monitoring advice
+            mon = assessment.monitoring_advice or {}
+            if mon:
+                parts.append("\nMonitoring / when to seek help:")
+                when = mon.get('when_to_seek_help') if isinstance(mon, dict) else mon
+                if isinstance(when, (list, tuple)):
+                    for w in when[:6]:
+                        parts.append(f" - {w}")
+                else:
+                    parts.append(str(when))
+
+            # Raw AI payloads for debugging (if present)
+            if getattr(assessment, 'raw_ai_output', None):
+                try:
+                    raw = assessment.raw_ai_output
+                    if isinstance(raw, (dict, list)):
+                        parts.append('\nAI Raw Output:')
+                        parts.append(json.dumps(raw, indent=2)[:800])
+                    else:
+                        parts.append('\nAI Raw Output:')
+                        parts.append(str(raw)[:800])
+                except Exception:
+                    pass
+
+            # Join with newlines for WhatsApp readability
+            return "\n".join(parts)
+        except Exception as e:
+            logger.exception("[CLINICIAN] Error formatting clinician assessment")
+            return "(Unable to render detailed assessment)"
     
    
     # NOTIFICATION METHODS
