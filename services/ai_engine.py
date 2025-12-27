@@ -27,6 +27,11 @@ class AIEngine:
         Returns:
             str: First triage question
         """
+        # Only respond to medical complaints
+        if not self._is_medical_text(chief_complaint):
+            logger.info("AIEngine: chief_complaint not medical, skipping first question")
+            return None
+
         system_prompt = """You are a medical triage AI assistant. Generate ONE specific, 
         realistic follow-up question to better understand the patient's symptoms. 
         Keep the question under 150 characters. Be empathetic and professional."""
@@ -68,6 +73,11 @@ class AIEngine:
                     'response': q.patient_response
                 })
         
+        # Only continue if conversation seems medical
+        if not self._is_medical_text(conversation.chief_complaint) and not self._is_medical_text(current_response):
+            logger.info("AIEngine: conversation not medical, skipping next question")
+            return None
+
         system_prompt = """You are a medical triage AI. Generate ONE specific, 
         context-aware follow-up question based on the patient's responses. 
         Consider what you've learned so far. Keep under 150 characters."""
@@ -112,6 +122,11 @@ class AIEngine:
         
         profile = conversation.patient.patient_profile
         
+        # Ensure this conversation is medical before generating an assessment
+        if not self._is_medical_text(conversation.chief_complaint):
+            logger.info("AIEngine: conversation chief_complaint not medical, skipping assessment generation")
+            return None
+
         system_prompt = """You are a medical AI assistant generating a clinical assessment.
         Output ONLY valid JSON with NO markdown, NO explanations, NO code blocks.
         The JSON must be valid and parseable."""
@@ -204,6 +219,44 @@ class AIEngine:
                 red_flags.append(keyword)
         
         return red_flags
+
+    def _is_medical_text(self, text):
+        """Return True if `text` appears medical in nature.
+
+        Uses a configurable list in `settings.MEDICAL_KEYWORDS` if available,
+        otherwise falls back to a conservative built-in list. The check is a
+        simple keyword match (case-insensitive)."""
+        try:
+            if not text or not isinstance(text, str):
+                return False
+
+            text_lower = text.lower()
+
+            # Use configured medical keywords when available
+            keywords = getattr(settings, 'MEDICAL_KEYWORDS', None)
+            if not keywords:
+                keywords = [
+                    'pain', 'fever', 'cough', 'headache', 'nausea', 'vomit', 'vomiting',
+                    'bleeding', 'shortness of breath', 'breath', 'dizzy', 'dizziness',
+                    'allergy', 'rash', 'swelling', 'infection', 'temperature', 'antibiotic',
+                    'fracture', 'injury', 'chest pain', 'abdominal', 'diarrhea', 'constipation',
+                    'pregnant', 'pregnancy', 'labor', 'seizure', 'stroke', 'suicide', 'suicidal'
+                ]
+
+            # If any keyword appears, treat as medical
+            for kw in keywords:
+                if kw in text_lower:
+                    return True
+
+            # Also consider presence of numeric vitals patterns (e.g., 'bp', 'bpm', '°c')
+            vitals_tokens = ['bp', 'bpm', 'mmhg', '°c', 'celsius', 'temperature', 'pulse']
+            for t in vitals_tokens:
+                if t in text_lower:
+                    return True
+
+            return False
+        except Exception:
+            return False
     
     def _parse_json_response(self, response):
         """
