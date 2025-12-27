@@ -1,12 +1,12 @@
 import logging
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from django.utils import timezone
 from django.conf import settings
 from django.db.models import Q
 from apps.conversations.models import ConversationSession, Message
 from apps.assessments.models import AIAssessment, AssessmentReview
-from apps.clinician.models import ClinicianAvailability, PatientAssignment
+from apps.clinician.models import ClinicianAvailability, PatientAssignment, ModificationSession
 from apps.authentication.models import User, ClinicianProfile
 from apps.audit.models import AuditLog
 from apps.escalations.models import EscalationAlert
@@ -18,7 +18,7 @@ logger = logging.getLogger('lifegate')
 class ClinicianWhatsAppHandler:
     """
     Complete working handler for clinician WhatsApp messages.
-    Handles all commands: pending, approve, send, message, etc.
+    Now with interactive modification workflow.
     """
     
     def __init__(self):
@@ -60,6 +60,11 @@ class ClinicianWhatsAppHandler:
             
             logger.info(f"[CLINICIAN] Found: {clinician.first_name} {clinician.last_name}")
             
+            # Check if clinician is in modification session
+            mod_session = self._get_active_modification_session(clinician)
+            if mod_session:
+                return self._handle_modification_workflow(clinician, message_body, mod_session)
+            
             # Log incoming message
             AuditLog.objects.create(
                 user=clinician,
@@ -87,7 +92,7 @@ class ClinicianWhatsAppHandler:
                 return True
             
             elif command == 'modify':
-                return self._handle_modify(clinician, args)
+                return self._start_modify_workflow(clinician, args)
             
             elif command == 'escalations':
                 self._send_escalations(clinician)
@@ -119,8 +124,7 @@ class ClinicianWhatsAppHandler:
         except Exception as e:
             print(f"[CLINICIAN] Error: {str(e)}", exc_info=True)
             return False
-    
-   
+        
     # COMMAND: HELP
    
     
@@ -135,6 +139,7 @@ class ClinicianWhatsAppHandler:
 • patients - List your active patients
 
 *TAKE ACTIONS:*
+• modify <id> - Modify assessment
 • approve <id> - Approve assessment
 • reject <id> - Reject assessment
 • send <id> - Send to patient
@@ -211,8 +216,7 @@ Type *help* anytime for this message."""
         except Exception as e:
             print(f"[CLINICIAN] Error in pending: {str(e)}", exc_info=True)
             self._send_to_clinician(clinician, "❌ Error loading pending assessments")
-    
-   
+            
     # COMMAND: ESCALATIONS
     
     
@@ -702,9 +706,535 @@ Type *help* anytime for this message."""
         
         logger.warning(f"[CLINICIAN] Unknown command: {command}")
     
-   
-    # HELPER METHODS
+    # MODIFICATION WORKFLOW 
     
+    def _get_active_modification_session(self, clinician):
+        """Get active modification session for clinician."""
+        try:
+            session = ModificationSession.objects.filter(
+                clinician=clinician,
+                status='IN_PROGRESS',
+                created_at__gte=timezone.now() - timedelta(hours=1)  # Expire after 1 hour
+            ).first()
+            
+            if session and session.is_expired():
+                session.status = 'EXPIRED'
+                session.save()
+                self.twilio.send_message(
+                    clinician.whatsapp_id,
+                    "⏰ Modification session expired (older than 1 hour).\n\n"
+                    "Start new: modify <assessment_id>"
+                )
+                return None
+            
+            return session
+        except Exception as e:
+            logger.error(f"[CLINICIAN] Error getting modification session: {str(e)}")
+            return None
+    
+    def _start_modify_workflow(self, clinician, args):
+        """
+        Start interactive modification workflow.
+        
+        Usage: modify <assessment_id>
+        """
+        try:
+            if not args.strip():
+                self.twilio.send_message(
+                    clinician.whatsapp_id,
+                    "❌ *USAGE:* modify <assessment_id>\n\n"
+                    "Example: modify abc-123"
+                )
+                return False
+            
+            assessment_id = args.split()[0]
+            
+            # Find assessment
+            assessment = AIAssessment.objects.get(
+                id__startswith=assessment_id,
+                conversation__assigned_clinician=clinician
+            )
+            
+            # Create modification session
+            mod_session = ModificationSession.objects.create(
+                clinician=clinician,
+                assessment=assessment,
+                status='IN_PROGRESS',
+                current_step='MEDICATIONS'  # Start with medications
+            )
+            
+            logger.info(f"[CLINICIAN] Started modification session: {mod_session.id}")
+            
+            # Send initial assessment summary
+            summary = self._get_assessment_summary(assessment)
+            self.twilio.send_message(
+                clinician.whatsapp_id,
+                f"📝 *MODIFYING ASSESSMENT*\n\n"
+                f"Patient: {assessment.patient.phone_number}\n"
+                f"Chief: {assessment.chief_complaint[:50]}\n\n"
+                f"{summary}\n\n"
+                f"Session ID: {str(mod_session.id)[:12]}"
+            )
+            
+            # Start first step
+            self._send_modification_step(clinician, mod_session)
+            
+            return True
+        
+        except AIAssessment.DoesNotExist:
+            self.twilio.send_message(
+                clinician.whatsapp_id,
+                "❌ Assessment not found\n\nCheck: pending"
+            )
+            return False
+        
+        except Exception as e:
+            print(f"[CLINICIAN] Error starting modify: {str(e)}", exc_info=True)
+            self.twilio.send_message(
+                clinician.whatsapp_id,
+                "❌ Error starting modification"
+            )
+            return False
+    
+    def _send_modification_step(self, clinician, mod_session):
+        """Send next modification step prompt."""
+        assessment = mod_session.assessment
+        
+        if mod_session.current_step == 'MEDICATIONS':
+            message = "💊 *STEP 1: MEDICATIONS*\n\n"
+            message += "*Current medications:*\n"
+            
+            current_meds = assessment.otc_suggestions.get('medications', []) if assessment.otc_suggestions else []
+            if current_meds:
+                for idx, med in enumerate(current_meds, 1):
+                    if isinstance(med, dict):
+                        message += f"{idx}. {med.get('name')}: {med.get('dosage')} {med.get('frequency')}\n"
+                    else:
+                        message += f"{idx}. {med}\n"
+            else:
+                message += "No medications\n"
+            
+            message += "\n*Reply with:*\n"
+            message += "1️⃣ Keep same\n"
+            message += "2️⃣ Add medication (format: name|dosage|frequency)\n"
+            message += "3️⃣ Remove all\n"
+            message += "4️⃣ Edit (e.g., 'remove 1' or 'add aspirin|500mg|twice daily')\n\n"
+            message += "Example: add aspirin|500mg|twice daily"
+        
+        elif mod_session.current_step == 'RECOMMENDATIONS':
+            message = "🎯 *STEP 2: RECOMMENDATIONS*\n\n"
+            message += "*Current recommendations:*\n"
+            
+            current_recs = assessment.preliminary_recommendations.get('lifestyle_changes', []) if assessment.preliminary_recommendations else []
+            if current_recs:
+                for idx, rec in enumerate(current_recs[:5], 1):
+                    message += f"{idx}. {rec}\n"
+            else:
+                message += "No recommendations\n"
+            
+            message += "\n*Reply with:*\n"
+            message += "1️⃣ Keep same\n"
+            message += "2️⃣ Add recommendation\n"
+            message += "3️⃣ Remove all\n"
+            message += "4️⃣ Edit (e.g., 'remove 1' or 'add Get plenty of rest')\n\n"
+            message += "Example: add Get plenty of rest"
+        
+        elif mod_session.current_step == 'MONITORING':
+            message = "⚠️ *STEP 3: WHEN TO SEEK HELP*\n\n"
+            message += "*Current guidelines:*\n"
+            
+            current_when = assessment.monitoring_advice.get('when_to_seek_help', []) if assessment.monitoring_advice else []
+            if current_when:
+                for idx, item in enumerate(current_when[:5], 1):
+                    message += f"{idx}. {item}\n"
+            else:
+                message += "No guidelines\n"
+            
+            message += "\n*Reply with:*\n"
+            message += "1️⃣ Keep same\n"
+            message += "2️⃣ Add guideline\n"
+            message += "3️⃣ Remove all\n"
+            message += "4️⃣ Edit (e.g., 'remove 1' or 'add Severe fever lasting 3+ days')\n\n"
+            message += "Example: add Severe fever lasting 3+ days"
+        
+        elif mod_session.current_step == 'NOTES':
+            message = "📄 *STEP 4: DOCTOR'S NOTE*\n\n"
+            message += "Add a personal note for the patient (optional).\n\n"
+            message += "*Reply with:*\n"
+            message += "1️⃣ Skip (no note)\n"
+            message += "2️⃣ Your note\n\n"
+            message += "Example: Take medicine with meals and avoid dairy"
+        
+        elif mod_session.current_step == 'CONFIRM':
+            message = "✅ *REVIEW & CONFIRM*\n\n"
+            message += self._format_modification_summary(mod_session)
+            message += "\n\n*Reply:*\n"
+            message += "1️⃣ CONFIRM (send to patient)\n"
+            message += "2️⃣ CANCEL (discard changes)"
+        
+        self.twilio.send_message(clinician.whatsapp_id, message)
+    
+    def _handle_modification_workflow(self, clinician, response, mod_session):
+        """Handle clinician response during modification workflow."""
+        try:
+            response = response.strip().lower()
+            assessment = mod_session.assessment
+            
+            # Handle different steps
+            if mod_session.current_step == 'MEDICATIONS':
+                if response == '1':
+                    # Keep same
+                    if mod_session.modified_otc_suggestions is None:
+                        mod_session.modified_otc_suggestions = assessment.otc_suggestions or {'medications': []}
+                    mod_session.current_step = 'RECOMMENDATIONS'
+                    mod_session.save(update_fields=['modified_otc_suggestions', 'current_step', 'updated_at'])
+                    self.twilio.send_message(clinician.whatsapp_id, "✅ Keeping medications as is")
+                    self._send_modification_step(clinician, mod_session)
+                
+                elif response.startswith('2') or response.startswith('add'):
+                    # Add medication
+                    med_text = response.replace('add', '').strip()
+                    
+                    # Initialize from original if not already modified
+                    if mod_session.modified_otc_suggestions is None:
+                        original = assessment.otc_suggestions or {'medications': []}
+                        # Deep copy to avoid modifying original
+                        mod_session.modified_otc_suggestions = {
+                            'medications': list(original.get('medications', []))
+                        }
+                    
+                    parsed_med = self._parse_medication(med_text)
+                    if parsed_med:
+                        meds = mod_session.modified_otc_suggestions.get('medications', [])
+                        meds.append(parsed_med)
+                        # Explicitly update the field
+                        mod_session.modified_otc_suggestions['medications'] = meds
+                        mod_session.save(update_fields=['modified_otc_suggestions', 'updated_at'])
+                        self.twilio.send_message(
+                            clinician.whatsapp_id,
+                            f"✅ Added: {parsed_med.get('name')}\n\n"
+                            f"Continue editing or reply '1' to confirm"
+                        )
+                    else:
+                        self.twilio.send_message(
+                            clinician.whatsapp_id,
+                            "❌ Invalid format\n\n"
+                            "Use: add name|dosage|frequency\n"
+                            "Example: add aspirin|500mg|twice daily"
+                        )
+                
+                elif response == '3':
+                    # Remove all
+                    mod_session.modified_otc_suggestions = {'medications': []}
+                    mod_session.save(update_fields=['modified_otc_suggestions', 'updated_at'])
+                    self.twilio.send_message(clinician.whatsapp_id, "✅ All medications removed")
+                    mod_session.current_step = 'RECOMMENDATIONS'
+                    mod_session.save(update_fields=['current_step', 'updated_at'])
+                    self._send_modification_step(clinician, mod_session)
+                
+                elif response.startswith('remove'):
+                    # Remove specific
+                    try:
+                        idx = int(response.split()[-1]) - 1
+                        if mod_session.modified_otc_suggestions is None:
+                            original = assessment.otc_suggestions or {'medications': []}
+                            mod_session.modified_otc_suggestions = {
+                                'medications': list(original.get('medications', []))
+                            }
+                        
+                        meds = mod_session.modified_otc_suggestions.get('medications', [])
+                        if 0 <= idx < len(meds):
+                            removed = meds.pop(idx)
+                            mod_session.modified_otc_suggestions['medications'] = meds
+                            mod_session.save(update_fields=['modified_otc_suggestions', 'updated_at'])
+                            self.twilio.send_message(
+                                clinician.whatsapp_id,
+                                f"✅ Removed medication"
+                            )
+                        else:
+                            self.twilio.send_message(clinician.whatsapp_id, "❌ Invalid index")
+                    except:
+                        self.twilio.send_message(clinician.whatsapp_id, "❌ Invalid format")
+            
+            elif mod_session.current_step == 'RECOMMENDATIONS':
+                if response == '1':
+                    # Keep same
+                    if mod_session.modified_recommendations is None:
+                        mod_session.modified_recommendations = assessment.preliminary_recommendations or {'lifestyle_changes': []}
+                    mod_session.current_step = 'MONITORING'
+                    mod_session.save(update_fields=['modified_recommendations', 'current_step', 'updated_at'])
+                    self.twilio.send_message(clinician.whatsapp_id, "✅ Keeping recommendations as is")
+                    self._send_modification_step(clinician, mod_session)
+                
+                elif response.startswith('2') or response.startswith('add'):
+                    # Add recommendation
+                    rec_text = response.replace('add', '').strip()
+                    
+                    if mod_session.modified_recommendations is None:
+                        original = assessment.preliminary_recommendations or {'lifestyle_changes': []}
+                        mod_session.modified_recommendations = {
+                            'lifestyle_changes': list(original.get('lifestyle_changes', []))
+                        }
+                    
+                    recs = mod_session.modified_recommendations.get('lifestyle_changes', [])
+                    recs.append(rec_text)
+                    mod_session.modified_recommendations['lifestyle_changes'] = recs
+                    mod_session.save(update_fields=['modified_recommendations', 'updated_at'])
+                    self.twilio.send_message(clinician.whatsapp_id, f"✅ Added recommendation")
+                
+                elif response == '3':
+                    # Remove all
+                    mod_session.modified_recommendations = {'lifestyle_changes': []}
+                    mod_session.current_step = 'MONITORING'
+                    mod_session.save(update_fields=['modified_recommendations', 'current_step', 'updated_at'])
+                    self.twilio.send_message(clinician.whatsapp_id, "✅ All recommendations removed")
+                    self._send_modification_step(clinician, mod_session)
+                
+                elif response.startswith('remove'):
+                    # Remove specific
+                    try:
+                        idx = int(response.split()[-1]) - 1
+                        if mod_session.modified_recommendations is None:
+                            original = assessment.preliminary_recommendations or {'lifestyle_changes': []}
+                            mod_session.modified_recommendations = {
+                                'lifestyle_changes': list(original.get('lifestyle_changes', []))
+                            }
+                        
+                        recs = mod_session.modified_recommendations.get('lifestyle_changes', [])
+                        if 0 <= idx < len(recs):
+                            recs.pop(idx)
+                            mod_session.modified_recommendations['lifestyle_changes'] = recs
+                            mod_session.save(update_fields=['modified_recommendations', 'updated_at'])
+                            self.twilio.send_message(clinician.whatsapp_id, f"✅ Removed recommendation")
+                        else:
+                            self.twilio.send_message(clinician.whatsapp_id, "❌ Invalid index")
+                    except:
+                        self.twilio.send_message(clinician.whatsapp_id, "❌ Invalid format")
+            
+            elif mod_session.current_step == 'MONITORING':
+                if response == '1':
+                    # Keep same
+                    if mod_session.modified_monitoring_advice is None:
+                        mod_session.modified_monitoring_advice = assessment.monitoring_advice or {'when_to_seek_help': []}
+                    mod_session.current_step = 'NOTES'
+                    mod_session.save(update_fields=['modified_monitoring_advice', 'current_step', 'updated_at'])
+                    self.twilio.send_message(clinician.whatsapp_id, "✅ Keeping guidelines as is")
+                    self._send_modification_step(clinician, mod_session)
+                
+                elif response.startswith('2') or response.startswith('add'):
+                    # Add guideline
+                    guide_text = response.replace('add', '').strip()
+                    
+                    if mod_session.modified_monitoring_advice is None:
+                        original = assessment.monitoring_advice or {'when_to_seek_help': []}
+                        mod_session.modified_monitoring_advice = {
+                            'when_to_seek_help': list(original.get('when_to_seek_help', []))
+                        }
+                    
+                    guides = mod_session.modified_monitoring_advice.get('when_to_seek_help', [])
+                    guides.append(guide_text)
+                    mod_session.modified_monitoring_advice['when_to_seek_help'] = guides
+                    mod_session.save(update_fields=['modified_monitoring_advice', 'updated_at'])
+                    self.twilio.send_message(clinician.whatsapp_id, f"✅ Added guideline")
+                
+                elif response == '3':
+                    # Remove all
+                    mod_session.modified_monitoring_advice = {'when_to_seek_help': []}
+                    mod_session.current_step = 'NOTES'
+                    mod_session.save(update_fields=['modified_monitoring_advice', 'current_step', 'updated_at'])
+                    self.twilio.send_message(clinician.whatsapp_id, "✅ All guidelines removed")
+                    self._send_modification_step(clinician, mod_session)
+                
+                elif response.startswith('remove'):
+                    # Remove specific
+                    try:
+                        idx = int(response.split()[-1]) - 1
+                        if mod_session.modified_monitoring_advice is None:
+                            original = assessment.monitoring_advice or {'when_to_seek_help': []}
+                            mod_session.modified_monitoring_advice = {
+                                'when_to_seek_help': list(original.get('when_to_seek_help', []))
+                            }
+                        
+                        guides = mod_session.modified_monitoring_advice.get('when_to_seek_help', [])
+                        if 0 <= idx < len(guides):
+                            guides.pop(idx)
+                            mod_session.modified_monitoring_advice['when_to_seek_help'] = guides
+                            mod_session.save(update_fields=['modified_monitoring_advice', 'updated_at'])
+                            self.twilio.send_message(clinician.whatsapp_id, f"✅ Removed guideline")
+                        else:
+                            self.twilio.send_message(clinician.whatsapp_id, "❌ Invalid index")
+                    except:
+                        self.twilio.send_message(clinician.whatsapp_id, "❌ Invalid format")
+            
+            elif mod_session.current_step == 'NOTES':
+                if response == '1':
+                    # Skip notes
+                    mod_session.clinician_notes = ''
+                    mod_session.current_step = 'CONFIRM'
+                    mod_session.save()
+                    self.twilio.send_message(clinician.whatsapp_id, "✅ Skipping doctor's note")
+                    self._send_modification_step(clinician, mod_session)
+                else:
+                    # Save notes
+                    mod_session.clinician_notes = response
+                    mod_session.current_step = 'CONFIRM'
+                    mod_session.save()
+                    self.twilio.send_message(clinician.whatsapp_id, "✅ Note saved")
+                    self._send_modification_step(clinician, mod_session)
+            
+            elif mod_session.current_step == 'CONFIRM':
+                if response.startswith('1') or response.startswith('confirm'):
+                    # Save modifications and create review
+                    return self._finalize_modifications(clinician, mod_session)
+                
+                elif response.startswith('2') or response.startswith('cancel'):
+                    # Cancel workflow
+                    mod_session.status = 'CANCELLED'
+                    mod_session.save()
+                    self.twilio.send_message(
+                        clinician.whatsapp_id,
+                        "❌ Modification cancelled.\n\n"
+                        "Changes discarded."
+                    )
+                    return True
+            
+            return True
+        
+        except Exception as e:
+            print(f"[CLINICIAN] Error in modification workflow: {str(e)}", exc_info=True)
+            self.twilio.send_message(clinician.whatsapp_id, "❌ Error processing response")
+            return False
+    
+    def _finalize_modifications(self, clinician, mod_session):
+        """Create assessment review with modifications."""
+        try:
+            assessment = mod_session.assessment
+            
+            # Create assessment review
+            review = AssessmentReview.objects.create(
+                assessment=assessment,
+                clinician=clinician,
+                action='MODIFIED',
+                clinician_notes=mod_session.clinician_notes,
+                clinician_risk_level='MODERATE',
+                modified_recommendations=mod_session.modified_recommendations,
+                modified_otc_suggestions=mod_session.modified_otc_suggestions,
+                modified_monitoring_advice=mod_session.modified_monitoring_advice
+            )
+            
+            # Update assessment status
+            assessment.status = 'MODIFIED'
+            assessment.save()
+            
+            # Mark session as complete
+            mod_session.status = 'COMPLETED'
+            mod_session.save()
+            
+            # Log action
+            AuditLog.objects.create(
+                user=clinician,
+                action_type='ASSESSMENT_MODIFIED',
+                resource_type='AIAssessment',
+                resource_id=str(assessment.id),
+                description='Modified via WhatsApp'
+            )
+            
+            message = f"✅ *ASSESSMENT MODIFIED*\n\n"
+            message += f"Patient: {assessment.patient.phone_number}\n"
+            message += f"Status: MODIFIED\n\n"
+            message += f"👉 Next: send {str(assessment.id)[:12]}\n"
+            message += f"(to send modified version to patient)"
+            
+            self.twilio.send_message(clinician.whatsapp_id, message)
+            
+            logger.info(f"[CLINICIAN] Finalized modifications for {assessment.id}")
+            return True
+        
+        except Exception as e:
+            print(f"[CLINICIAN] Error finalizing: {str(e)}", exc_info=True)
+            self.twilio.send_message(clinician.whatsapp_id, "❌ Error saving modifications")
+            return False
+    
+    # ============= HELPER METHODS =============
+    
+    def _get_assessment_summary(self, assessment):
+        """Get summary of current assessment."""
+        try:
+            lines = []
+            
+            # Symptoms
+            symptoms = assessment.symptoms_overview.get('primary_symptoms', []) if assessment.symptoms_overview else []
+            if symptoms:
+                lines.append(f"*Symptoms:* {', '.join(symptoms[:2])}")
+            
+            # Condition
+            condition = assessment.key_observations.get('likely_condition', '') if assessment.key_observations else ''
+            if condition:
+                lines.append(f"*Condition:* {condition[:40]}")
+            
+            # Confidence
+            confidence = int(assessment.confidence_score * 100) if assessment.confidence_score else 0
+            lines.append(f"*Confidence:* {confidence}%")
+            
+            return "\n".join(lines)
+        except:
+            return "Assessment loaded"
+    
+    def _parse_medication(self, med_text):
+        """Parse medication string: name|dosage|frequency"""
+        try:
+            parts = med_text.split('|')
+            if len(parts) >= 3:
+                return {
+                    'name': parts[0].strip(),
+                    'dosage': parts[1].strip(),
+                    'frequency': parts[2].strip()
+                }
+            return None
+        except:
+            return None
+    
+    def _format_modification_summary(self, mod_session):
+        """Format summary of modifications."""
+        lines = ["📋 *MODIFIED ASSESSMENT SUMMARY:*"]
+        
+        assessment = mod_session.assessment
+        
+        # Medications
+        lines.append("\n💊 *Medications:*")
+        meds = mod_session.modified_otc_suggestions.get('medications', []) if mod_session.modified_otc_suggestions else []
+        if meds:
+            for med in meds[:3]:
+                if isinstance(med, dict):
+                    lines.append(f"• {med.get('name')}: {med.get('dosage')} {med.get('frequency')}")
+                else:
+                    lines.append(f"• {med}")
+        else:
+            lines.append("• None")
+        
+        # Recommendations
+        lines.append("\n🎯 *Recommendations:*")
+        recs = mod_session.modified_recommendations.get('lifestyle_changes', []) if mod_session.modified_recommendations else []
+        if recs:
+            for rec in recs[:3]:
+                lines.append(f"• {rec}")
+        else:
+            lines.append("• None")
+        
+        # Monitoring
+        lines.append("\n⚠️ *When to seek help:*")
+        when = mod_session.modified_monitoring_advice.get('when_to_seek_help', []) if mod_session.modified_monitoring_advice else []
+        if when:
+            for w in when[:3]:
+                lines.append(f"• {w}")
+        else:
+            lines.append("• None")
+        
+        # Notes
+        if mod_session.clinician_notes:
+            lines.append(f"\n📄 *Doctor's Note:*\n{mod_session.clinician_notes}")
+        
+        return "\n".join(lines)
     
     def _get_clinician_by_whatsapp(self, whatsapp_id):
         """Get clinician user by WhatsApp ID."""
@@ -712,7 +1242,6 @@ Type *help* anytime for this message."""
             if not whatsapp_id:
                 return None
 
-            # Normalize incoming id: accept both 'whatsapp:+123' and '+123'
             raw = whatsapp_id[9:] if whatsapp_id.startswith('whatsapp:') else whatsapp_id
 
             user = User.objects.filter(role='CLINICIAN').filter(
@@ -727,12 +1256,12 @@ Type *help* anytime for this message."""
             return None
 
     def _send_to_clinician(self, clinician, message):
-        """Send WhatsApp message to clinician, falling back to phone number."""
+        """Send WhatsApp message to clinician."""
         try:
             to_whatsapp = clinician.whatsapp_id or clinician.phone_number
             self.twilio.send_message(to_whatsapp, message)
         except Exception as e:
-            print(f"[CLINICIAN] Error sending to clinician: {str(e)}", exc_info=True)
+            print(f"[CLINICIAN] Error sending: {str(e)}", exc_info=True)
     
     def _format_assessment_message(self, assessment, clinician):
         """Format assessment as beautiful WhatsApp message."""

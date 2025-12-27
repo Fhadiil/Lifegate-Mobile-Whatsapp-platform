@@ -5,6 +5,7 @@ from django.utils import timezone
 from datetime import timedelta
 from apps.authentication.models import User
 from apps.conversations.models import ConversationSession
+from apps.assessments.models import AIAssessment
 
 
 class ClinicianAvailability(models.Model):
@@ -158,3 +159,70 @@ class ClinicianAction(models.Model):
     
     def __str__(self):
         return f"{self.clinician.get_full_name()} - {self.action_type}"
+    
+
+
+class ModificationSession(models.Model):
+    """
+    Track clinician modification workflow state.
+    Allows multi-step interactive modification via WhatsApp.
+    """
+    
+    STEP_CHOICES = [
+        ('MEDICATIONS', 'Medications'),
+        ('RECOMMENDATIONS', 'Recommendations'),
+        ('MONITORING', 'Monitoring Advice'),
+        ('NOTES', "Doctor's Note"),
+        ('CONFIRM', 'Confirmation'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('IN_PROGRESS', 'In Progress'),
+        ('COMPLETED', 'Completed'),
+        ('CANCELLED', 'Cancelled'),
+        ('EXPIRED', 'Expired'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    clinician = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name='modification_sessions',
+        limit_choices_to={'role': 'CLINICIAN'}
+    )
+    assessment = models.ForeignKey(
+        AIAssessment, on_delete=models.CASCADE, related_name='modification_sessions'
+    )
+    
+    # Workflow state
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='IN_PROGRESS')
+    current_step = models.CharField(max_length=20, choices=STEP_CHOICES, default='MEDICATIONS')
+    
+    # Modifications
+    modified_otc_suggestions = models.JSONField(null=True, blank=True)
+    modified_recommendations = models.JSONField(null=True, blank=True)
+    modified_monitoring_advice = models.JSONField(null=True, blank=True)
+    clinician_notes = models.TextField(blank=True)
+    
+    # Metadata
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['clinician', 'status']),
+            models.Index(fields=['assessment', 'status']),
+        ]
+    
+    def __str__(self):
+        return f"{self.clinician.get_full_name()} - {self.assessment.id} - {self.status}"
+    
+    def is_expired(self):
+        """Check if session is older than 1 hour."""
+        return timezone.now() - self.created_at > timedelta(hours=1)
+    
+    def mark_completed(self):
+        """Mark session as completed."""
+        self.status = 'COMPLETED'
+        self.completed_at = timezone.now()
+        self.save()
