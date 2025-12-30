@@ -202,6 +202,11 @@ class ModificationSession(models.Model):
     modified_monitoring_advice = models.JSONField(null=True, blank=True)
     clinician_notes = models.TextField(blank=True)
     
+    # Validation fields
+    validation_result = models.JSONField(null=True, blank=True, help_text="Result from AI validator")
+    sent_with_warnings = models.BooleanField(default=False, help_text="Was this sent despite validation warnings?")
+    warning_override_reason = models.TextField(blank=True, help_text="Why clinician overrode warnings")
+    
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
