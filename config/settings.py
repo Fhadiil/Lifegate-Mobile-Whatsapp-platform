@@ -206,3 +206,21 @@ SPECTACULAR_SETTINGS = {
 }
 
 CORS_ALLOW_ALL_ORIGINS = True
+
+# Media files
+MEDIA_URL = '/media/'
+MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+
+# Site URL 
+SITE_URL = 'https://jenae-unordinary-shabbily.ngrok-free.dev'  
+
+# Allowed file types for media
+ALLOWED_UPLOAD_EXTENSIONS = ['pdf', 'jpg', 'png', 'doc', 'docx']
+
+# PDF Generation settings
+PDF_SETTINGS = {
+    'include_clinic_logo': True,
+    'include_qr_code': False,  
+    'page_size': 'letter',  
+    'font_size': 10,
+}

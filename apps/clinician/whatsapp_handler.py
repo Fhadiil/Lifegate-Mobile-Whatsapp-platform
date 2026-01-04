@@ -12,6 +12,7 @@ from apps.audit.models import AuditLog
 from apps.escalations.models import EscalationAlert
 from integrations.twilio.client import TwilioClient
 from apps.assessments.validator import AssessmentModificationValidator
+from apps.assessments.prescription_generator import PrescriptionPDFGenerator
 
 logger = logging.getLogger('lifegate')
 
@@ -21,6 +22,7 @@ class ClinicianWhatsAppHandler:
     def __init__(self):
         self.twilio = TwilioClient()
         self.validator = AssessmentModificationValidator()
+        self.pdf_generator = PrescriptionPDFGenerator()
     
     # MAIN ENTRY POINT
     
@@ -719,9 +721,21 @@ Type *help* anytime for this message."""
                 assessment, clinician, final_recs, final_meds, final_monitoring, notes
             )
             
+            pdf_buffer = self.pdf_generator.generate_prescription(
+                assessment, 
+                clinician, 
+                mod_session
+            )
+            
+            pdf_filename = f"prescription_{str(assessment.id)[:8].upper()}.pdf"
+            
+            pdf_path = self._save_prescription_pdf(assessment, pdf_buffer, pdf_filename)
+            
             # Send to patient
             logger.info(f"[CLINICIAN] Sending to patient: {assessment.patient.phone_number}")
             self.twilio.send_message(assessment.patient.whatsapp_id, formatted_message)
+            
+            self._send_pdf_to_patient(assessment.patient.whatsapp_id, pdf_buffer, pdf_filename)
             
             # Update assessment
             assessment.status = 'SENT_TO_PATIENT'
@@ -742,6 +756,8 @@ Type *help* anytime for this message."""
                 content=formatted_message,
                 delivery_status='SENT'
             )
+            
+            self._save_prescription_record(assessment, clinician, mod_session, pdf_path)
             
             message = f"✅ *ASSESSMENT SENT*\n\n"
             message += f"Patient: {assessment.patient.phone_number}\n"
@@ -1831,3 +1847,114 @@ Type *help* anytime for this message."""
             print(f"[CLINICIAN] Error in modify: {str(e)}", exc_info=True)
             self.twilio.send_message(clinician.whatsapp_id, "Error")
             return False
+        
+    # PDF SENDING METHODS 
+    
+    def _send_pdf_to_patient(self, patient_whatsapp_id, pdf_buffer, filename):
+        """Send PDF document via Twilio."""
+        try:
+            pdf_buffer.seek(0)
+            
+            # 1. Save to Django media storage
+            from django.core.files.base import ContentFile
+            from django.core.files.storage import default_storage
+            
+            # This saves to /media/prescriptions/filename.pdf
+            file_path = f"prescriptions/{filename}"
+            
+            # If file exists, delete it first to ensure overwrite (optional)
+            if default_storage.exists(file_path):
+                default_storage.delete(file_path)
+                
+            saved_path = default_storage.save(file_path, ContentFile(pdf_buffer.read()))
+            
+            # 2. Construct Public URL (Critical for Twilio)
+            from django.conf import settings
+            
+            # Ensure SITE_URL is set in settings.py (e.g. your Ngrok URL)
+            # Do NOT use localhost
+            base_url = getattr(settings, 'SITE_URL', '').rstrip('/')
+            if not base_url:
+                logger.error("[PDF] SITE_URL not set in settings. Cannot send media.")
+                return None
+                
+            pdf_url = f"{base_url}{settings.MEDIA_URL}{saved_path}"
+            
+            logger.info(f"[PDF] Public URL generated: {pdf_url}")
+            
+            # 3. Send via Twilio
+            message_text = "📄 *Official Prescription*\nPlease present this document at the pharmacy."
+            
+            self.twilio.send_media_message(
+                patient_whatsapp_id,
+                pdf_url,
+                message_text
+            )
+            
+            return saved_path
+            
+        except Exception as e:
+            logger.error(f"[PDF] Error sending PDF: {str(e)}", exc_info=True)
+            self.twilio.send_message(
+                patient_whatsapp_id,
+                "Note: Digital prescription generated but could not be attached. "
+                "Please contact support if needed."
+            )
+            return None
+    
+    def _save_prescription_pdf(self, assessment, pdf_buffer, filename):
+        """
+        Save prescription PDF to media storage for tracking and retrieval.
+        """
+        
+        try:
+            from django.core.files.base import ContentFile
+            from django.core.files.storage import default_storage
+            
+            # Reset buffer to start
+            pdf_buffer.seek(0)
+            
+            # Create file path
+            file_path = f"prescriptions/{assessment.patient.phone_number}/{filename}"
+            
+            # Save file
+            saved_path = default_storage.save(file_path, ContentFile(pdf_buffer.read()))
+            
+            logger.info(f"[PDF] Prescription saved: {saved_path}")
+            
+            return saved_path
+        
+        except Exception as e:
+            logger.error(f"[PDF] Error saving prescription: {str(e)}")
+            return None
+    
+    def _save_prescription_record(self, assessment, clinician, mod_session, pdf_path):
+        """
+        Save prescription record to database for audit trail.
+        """
+        
+        try:
+            # Import Prescription model (we'll create it)
+            from apps.assessments.models import Prescription
+            
+            prescription = Prescription.objects.create(
+                assessment=assessment,
+                patient=assessment.patient,
+                clinician=clinician,
+                pdf_file=pdf_path,
+                medications=mod_session.modified_otc_suggestions or assessment.otc_suggestions or {},
+                recommendations=mod_session.modified_recommendations or assessment.preliminary_recommendations or {},
+                warnings=mod_session.modified_monitoring_advice or assessment.monitoring_advice or {},
+                status='SENT'
+            )
+            
+            logger.info(f"[PDF] Prescription record created: {prescription.id}")
+            
+            return prescription
+        
+        except ImportError:
+            logger.warning("[PDF] Prescription model not found - skipping record save")
+            return None
+        except Exception as e:
+            logger.error(f"[PDF] Error saving prescription record: {str(e)}")
+            return None

@@ -404,6 +404,65 @@ To continue, reply:
         except Exception as e:
             print(f"Error handling triage response: {str(e)}")
             self.twilio.send_message(user.whatsapp_id, "An error occurred. Please try again.")
+            
+    def _format_for_whatsapp(self, obj, max_len=600):
+        """Convert dict/list/str to a concise single-line preview suitable for WhatsApp."""
+        try:
+            if obj is None:
+                return ''
+
+            if isinstance(obj, str):
+                try:
+                    parsed = json.loads(obj)
+                    obj = parsed
+                except Exception:
+                    s = ' '.join(obj.split())
+                    return s if len(s) <= max_len else s[: max_len - 3] + '...'
+
+            # If dict -> build readable key:value pairs in sensible order
+            if isinstance(obj, dict):
+                parts = []
+                preferred_order = [
+                    'primary_symptoms', 'secondary_symptoms', 'severity_rating', 'duration', 'onset', 'triggers',
+                    'likely_condition', 'risk_factors', 'notes', 'preliminary_recommendations', 'confidence_score'
+                ]
+
+                for key in preferred_order:
+                    if key in obj:
+                        val = obj[key]
+                        if isinstance(val, list):
+                            vstr = ', '.join(str(x) for x in val)
+                        else:
+                            vstr = str(val)
+                        label = key.replace('_', ' ').capitalize()
+                        parts.append(f"{label}: {vstr}")
+
+                # Add any remaining keys
+                for key, val in obj.items():
+                    if key in preferred_order:
+                        continue
+                    if isinstance(val, list):
+                        vstr = ', '.join(str(x) for x in val)
+                    else:
+                        vstr = str(val)
+                    parts.append(f"{key.replace('_', ' ').capitalize()}: {vstr}")
+
+                s = '; '.join(parts)
+                s = ' '.join(s.split())
+                return s if len(s) <= max_len else s[: max_len - 3] + '...'
+
+            # If list -> join
+            if isinstance(obj, list):
+                s = ', '.join(str(x) for x in obj)
+                s = ' '.join(s.split())
+                return s if len(s) <= max_len else s[: max_len - 3] + '...'
+
+            # Fallback: stringify and collapse whitespace
+            s = str(obj)
+            s = ' '.join(s.split())
+            return s if len(s) <= max_len else s[: max_len - 3] + '...'
+        except Exception:
+            return str(obj)
     
     def _generate_assessment(self, user, conversation):
         """Generate final AI assessment."""
@@ -433,12 +492,29 @@ To continue, reply:
             # Assign clinician
             self._assign_clinician(conversation)
             
-            # Notify patient
-            self.twilio.send_message(
-                user.whatsapp_id,
-                "Thank you! A clinician is reviewing your details. "
-                "You'll receive recommendations soon."
-            )
+            # Notify patient and include the complaint that will be reviewed
+            complaint = (conversation.chief_complaint or '').strip()
+            if complaint:
+                # Shorten long complaints for WhatsApp readability
+                preview = complaint if len(complaint) <= 240 else complaint[:237] + '...'
+                # Format assessment sections for readability
+                overview = self._format_for_whatsapp(assessment.symptoms_overview)
+                observations = self._format_for_whatsapp(assessment.key_observations)
+                recommendations = self._format_for_whatsapp(assessment.preliminary_recommendations)
+
+                patient_msg = (
+                    "Thank you! A clinician is reviewing your details.\n\n"
+                    f"Complaint: {preview}\n\n"
+                    f"Summary: {overview}\n\n"
+                    f"Observations: {observations}\n\n"
+                )
+            else:
+                patient_msg = (
+                    "Thank you! A clinician is reviewing your details. "
+                    "You'll receive recommendations soon."
+                )
+
+            self.twilio.send_message(user.whatsapp_id, patient_msg)
             
             logger.info(f"Assessment generated for {user.phone_number}")
         except Exception as e:

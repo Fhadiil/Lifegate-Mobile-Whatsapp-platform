@@ -4,6 +4,7 @@ from django.db import models
 from django.contrib.postgres.fields import ArrayField
 from apps.authentication.models import User
 from apps.conversations.models import ConversationSession
+from django.utils import timezone
 
 
 class AIAssessment(models.Model):
@@ -146,3 +147,105 @@ class AssessmentReview(models.Model):
                 'clinician_notes': self.clinician_notes,
             }
         return assessment_data
+    
+
+class Prescription(models.Model):
+    """
+    Prescription document record.
+    Tracks all prescriptions issued to patients.
+    """
+    
+    STATUS_CHOICES = [
+        ('DRAFT', 'Draft'),
+        ('SENT', 'Sent to Patient'),
+        ('PRINTED', 'Printed'),
+        ('FILLED', 'Filled at Pharmacy'),
+        ('EXPIRED', 'Expired'),
+        ('VOIDED', 'Voided'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    # Relationships
+    assessment = models.ForeignKey(
+        'AIAssessment', 
+        on_delete=models.CASCADE, 
+        related_name='prescriptions'
+    )
+    patient = models.ForeignKey(
+        User, 
+        on_delete=models.CASCADE, 
+        related_name='prescriptions',
+        limit_choices_to={'role': 'PATIENT'}
+    )
+    clinician = models.ForeignKey(
+        User, 
+        on_delete=models.SET_NULL, 
+        null=True,
+        related_name='issued_prescriptions',
+        limit_choices_to={'role': 'CLINICIAN'}
+    )
+    
+    # Content
+    medications = models.JSONField(help_text="Prescribed medications list")
+    recommendations = models.JSONField(help_text="Doctor's recommendations")
+    warnings = models.JSONField(help_text="Emergency warning signs")
+    notes = models.TextField(blank=True, help_text="Doctor's notes")
+    
+    # PDF File
+    pdf_file = models.FileField(
+        upload_to='prescriptions/%Y/%m/%d/',
+        blank=True,
+        null=True,
+        help_text="PDF prescription document"
+    )
+    
+    # Status
+    status = models.CharField(
+        max_length=20, 
+        choices=STATUS_CHOICES, 
+        default='SENT'
+    )
+    
+    # Validity
+    issued_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(help_text="Prescription expiry date (typically 30 days)")
+    sent_at = models.DateTimeField(null=True, blank=True)
+    printed_at = models.DateTimeField(null=True, blank=True)
+    
+    # Audit
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-issued_at']
+        indexes = [
+            models.Index(fields=['patient', 'issued_at']),
+            models.Index(fields=['clinician', 'issued_at']),
+            models.Index(fields=['status']),
+        ]
+    
+    def __str__(self):
+        return f"Prescription {self.id} - {self.patient.phone_number}"
+    
+    def save(self, *args, **kwargs):
+        # Set expiry date if not set (30 days from now)
+        if not self.expires_at:
+            self.expires_at = timezone.now() + timezone.timedelta(days=30)
+        
+        # Set sent_at when status becomes SENT
+        if self.status == 'SENT' and not self.sent_at:
+            self.sent_at = timezone.now()
+        
+        super().save(*args, **kwargs)
+    
+    @property
+    def is_valid(self):
+        """Check if prescription is still valid."""
+        return self.status not in ['EXPIRED', 'VOIDED'] and timezone.now() <= self.expires_at
+    
+    @property
+    def days_remaining(self):
+        """Days until prescription expires."""
+        remaining = (self.expires_at - timezone.now()).days
+        return max(0, remaining)
