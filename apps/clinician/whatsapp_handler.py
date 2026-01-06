@@ -121,6 +121,9 @@ class ClinicianWhatsAppHandler:
             elif command == 'status':
                 return self._handle_status(clinician, args)
             
+            elif command == 'close' or command == 'discharge':
+                return self._handle_close(clinician, args)
+            
             else:
                 self._send_unknown_command(clinician, command)
                 return True
@@ -149,6 +152,7 @@ class ClinicianWhatsAppHandler:
 • send <id> - Send to patient
 • message <conv_id> <message> - Message patient
 • status <available|busy|offline> - Update status
+• close <id> - Discharge patient (End Session)
 
 *EXAMPLES:*
 • pending
@@ -780,18 +784,15 @@ Type *help* anytime for this message."""
     
     def _handle_message(self, clinician, args):
         """
-        Send message to patient.
-        
-        Usage: message <conversation_id> <message>
-        Example: message conv-abc Hello, how are you?
+        Send message to patient (Smart ID Lookup).
+        Accepts EITHER Conversation ID OR Assessment ID.
         """
-        
         try:
             if not args.strip():
                 self.twilio.send_message(
                     clinician.whatsapp_id,
-                    "*USAGE:* message <conv_id> <message>\n\n"
-                    "Example: message conv-abc Hello"
+                    "*USAGE:* message <id> <text>\n\n"
+                    "Example: message abc-123 Hello there"
                 )
                 return False
             
@@ -799,23 +800,45 @@ Type *help* anytime for this message."""
             if len(parts) < 2:
                 self.twilio.send_message(
                     clinician.whatsapp_id,
-                    "*USAGE:* message <conv_id> <message>"
+                    "Missing message text.\nUsage: message <id> <text>"
                 )
                 return False
             
-            conv_id = parts[0]
+            input_id = parts[0]
             msg_text = parts[1]
             
-            logger.info(f"[CLINICIAN] Message to {conv_id}: {msg_text[:50]}")
+            conversation = None
+
             
-            # Find conversation
-            conversation = ConversationSession.objects.get(
-                id__startswith=conv_id,
+            # 1. Try finding by Conversation ID
+            conversation = ConversationSession.objects.filter(
+                id__startswith=input_id,
                 assigned_clinician=clinician
-            )
+            ).first()
+
+            # 2. If not found, try finding by Assessment ID
+            if not conversation:
+                assessment = AIAssessment.objects.filter(
+                    id__startswith=input_id,
+                    conversation__assigned_clinician=clinician
+                ).first()
+                if assessment:
+                    conversation = assessment.conversation
+
+            # 3. If still not found, fail
+            if not conversation:
+                print(f"[CLINICIAN] ID not found: {input_id}")
+                self.twilio.send_message(
+                    clinician.whatsapp_id,
+                    f"Context not found for ID: {input_id}\n"
+                    "Check the ID and try again."
+                )
+                return False
+
+
+            logger.info(f"[CLINICIAN] Message to {conversation.patient.phone_number}: {msg_text[:50]}")
             
             # Send to patient
-            logger.info(f"[CLINICIAN] Sending to {conversation.patient.phone_number}")
             self.twilio.send_message(conversation.patient.whatsapp_id, msg_text)
             
             # Save message
@@ -827,6 +850,10 @@ Type *help* anytime for this message."""
                 delivery_status='SENT'
             )
             
+            # Update conversation timestamp so it stays "Active"
+            conversation.updated_at = timezone.now()
+            conversation.save()
+            
             # Log
             AuditLog.objects.create(
                 user=clinician,
@@ -835,28 +862,99 @@ Type *help* anytime for this message."""
                 resource_id=str(message_record.id),
                 description=f'Message sent via WhatsApp'
             )
+            logger.info(f"[CLINICIAN] Message sent to patient {conversation.patient.phone_number}")
             
-            self.twilio.send_message(
-                clinician.whatsapp_id,
-                "✅ *MESSAGE SENT*"
-            )
-            
-            logger.info(f"[CLINICIAN] Message sent")
             return True
-        
-        except ConversationSession.DoesNotExist:
-            print(f"[CLINICIAN] Conversation not found: {args}")
-            self.twilio.send_message(
-                clinician.whatsapp_id,
-                "Conversation not found"
-            )
-            return False
         
         except Exception as e:
             print(f"[CLINICIAN] Error in message: {str(e)}", exc_info=True)
             self._send_to_clinician(clinician, "Error sending message")
             return False
     
+   # COMMAND: CLOSE / DISCHARGE
+
+    def _handle_close(self, clinician, args):
+        """
+        Close/Discharge a patient session.
+        Allows the patient to start over with a new complaint.
+        """
+        try:
+            if not args.strip():
+                self.twilio.send_message(
+                    clinician.whatsapp_id,
+                    "*USAGE:* close <id>\n\n"
+                    "Example: close abc-123\n"
+                    "(Ends the session so patient can start new)"
+                )
+                return False
+
+            input_id = args.split()[0]
+            conversation = None
+
+            # 1. Try Conversation ID
+            conversation = ConversationSession.objects.filter(
+                id__startswith=input_id,
+                assigned_clinician=clinician
+            ).first()
+
+            # 2. Try Assessment ID
+            if not conversation:
+                assessment = AIAssessment.objects.filter(
+                    id__startswith=input_id,
+                    conversation__assigned_clinician=clinician
+                ).first()
+                if assessment:
+                    conversation = assessment.conversation
+
+            if not conversation:
+                self.twilio.send_message(clinician.whatsapp_id, "❌ Session not found for that ID")
+                return False
+
+            
+            # 1. Close Conversation
+            conversation.status = 'COMPLETED'
+            conversation.closed_at = timezone.now()
+            conversation.save()
+
+            # 2. Close Patient Assignment (Remove from Active List)
+            PatientAssignment.objects.filter(
+                conversation=conversation,
+                clinician=clinician,
+                status='ACTIVE'
+            ).update(status='COMPLETED')
+
+            # 3. Update Availability (if needed)
+            availability, _ = ClinicianAvailability.objects.get_or_create(
+                clinician=clinician
+            )
+            if availability.status == 'BUSY':
+                availability.status = 'AVAILABLE'
+                availability.save()
+
+            # 4. Notify Patient
+            self.twilio.send_message(
+                conversation.patient.whatsapp_id,
+                "*SESSION CLOSED*\n\n"
+                f"Dr. {clinician.last_name} has closed this consultation.\n\n"
+                "If you have a new health concern in the future, just reply *Hi* to start a new assessment. 👋"
+            )
+
+            # 5. Notify Clinician
+            patient_name = conversation.patient.first_name or "Patient"
+            self.twilio.send_message(
+                clinician.whatsapp_id,
+                f"✅ Session closed for {patient_name}.\n"
+                "They have been removed from your active list."
+            )
+            
+            logger.info(f"[CLINICIAN] Discharged patient {conversation.patient.phone_number}")
+            return True
+
+        except Exception as e:
+            print(f"[CLINICIAN] Error closing session: {str(e)}", exc_info=True)
+            self._send_to_clinician(clinician, "Error closing session")
+            return False
+   
    
     # COMMAND: STATUS
     

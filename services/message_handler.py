@@ -405,70 +405,13 @@ To continue, reply:
             print(f"Error handling triage response: {str(e)}")
             self.twilio.send_message(user.whatsapp_id, "An error occurred. Please try again.")
             
-    def _format_for_whatsapp(self, obj, max_len=600):
-        """Convert dict/list/str to a concise single-line preview suitable for WhatsApp."""
-        try:
-            if obj is None:
-                return ''
-
-            if isinstance(obj, str):
-                try:
-                    parsed = json.loads(obj)
-                    obj = parsed
-                except Exception:
-                    s = ' '.join(obj.split())
-                    return s if len(s) <= max_len else s[: max_len - 3] + '...'
-
-            # If dict -> build readable key:value pairs in sensible order
-            if isinstance(obj, dict):
-                parts = []
-                preferred_order = [
-                    'primary_symptoms', 'secondary_symptoms', 'severity_rating', 'duration', 'onset', 'triggers',
-                    'likely_condition', 'risk_factors', 'notes', 'preliminary_recommendations', 'confidence_score'
-                ]
-
-                for key in preferred_order:
-                    if key in obj:
-                        val = obj[key]
-                        if isinstance(val, list):
-                            vstr = ', '.join(str(x) for x in val)
-                        else:
-                            vstr = str(val)
-                        label = key.replace('_', ' ').capitalize()
-                        parts.append(f"{label}: {vstr}")
-
-                # Add any remaining keys
-                for key, val in obj.items():
-                    if key in preferred_order:
-                        continue
-                    if isinstance(val, list):
-                        vstr = ', '.join(str(x) for x in val)
-                    else:
-                        vstr = str(val)
-                    parts.append(f"{key.replace('_', ' ').capitalize()}: {vstr}")
-
-                s = '; '.join(parts)
-                s = ' '.join(s.split())
-                return s if len(s) <= max_len else s[: max_len - 3] + '...'
-
-            # If list -> join
-            if isinstance(obj, list):
-                s = ', '.join(str(x) for x in obj)
-                s = ' '.join(s.split())
-                return s if len(s) <= max_len else s[: max_len - 3] + '...'
-
-            # Fallback: stringify and collapse whitespace
-            s = str(obj)
-            s = ' '.join(s.split())
-            return s if len(s) <= max_len else s[: max_len - 3] + '...'
-        except Exception:
-            return str(obj)
-    
     def _generate_assessment(self, user, conversation):
-        """Generate final AI assessment."""
+        """Generate final AI assessment and notify patient nicely."""
         try:
+            # 1. Generate Assessment from AI
             assessment_json = self.ai_engine.generate_assessment(conversation)
             
+            # 2. Save to Database
             assessment = AIAssessment.objects.create(
                 conversation=conversation,
                 patient=user,
@@ -485,41 +428,96 @@ To continue, reply:
                 status='GENERATED'
             )
             
+            # 3. Update Conversation State
             conversation.status = 'PENDING_CLINICIAN_REVIEW'
             conversation.triage_completed_at = timezone.now()
             conversation.save()
             
-            # Assign clinician
+            # 4. Assign Clinician
             self._assign_clinician(conversation)
             
-            # Notify patient and include the complaint that will be reviewed
-            complaint = (conversation.chief_complaint or '').strip()
-            if complaint:
-                # Shorten long complaints for WhatsApp readability
-                preview = complaint if len(complaint) <= 240 else complaint[:237] + '...'
-                # Format assessment sections for readability
-                overview = self._format_for_whatsapp(assessment.symptoms_overview)
-                observations = self._format_for_whatsapp(assessment.key_observations)
-                recommendations = self._format_for_whatsapp(assessment.preliminary_recommendations)
-
-                patient_msg = (
-                    "Thank you! A clinician is reviewing your details.\n\n"
-                    f"Complaint: {preview}\n\n"
-                    f"Summary: {overview}\n\n"
-                    f"Observations: {observations}\n\n"
-                )
-            else:
-                patient_msg = (
-                    "Thank you! A clinician is reviewing your details. "
-                    "You'll receive recommendations soon."
-                )
-
+            # 5. Send Summary to Patient
+            patient_msg = self._format_patient_summary(assessment, conversation)
             self.twilio.send_message(user.whatsapp_id, patient_msg)
             
-            logger.info(f"Assessment generated for {user.phone_number}")
+            logger.info(f"Assessment generated and sent to {user.phone_number}")
+
         except Exception as e:
             print(f"Error generating assessment: {str(e)}")
             self.twilio.send_message(user.whatsapp_id, "An error occurred. Please try again later.")
+
+    def _format_patient_summary(self, assessment, conversation):
+        """
+        Create a patient-friendly 'Health Card' summary.
+        Clean, reassuring, and easy to read on WhatsApp.
+        """
+        try:
+            # Safe extraction helpers
+            def get_list(src, key):
+                val = src.get(key, [])
+                return val if isinstance(val, list) else [str(val)]
+
+            # 1. Extract Data
+            symptoms_data = assessment.symptoms_overview or {}
+            obs_data = assessment.key_observations or {}
+            
+            # Primary Symptoms
+            symptoms = get_list(symptoms_data, 'primary_symptoms')
+            symptoms_text = ", ".join(symptoms[:3]) if symptoms else "Reported symptoms"
+            
+            # Likely Condition (Use safer language for AI)
+            condition = obs_data.get('likely_condition', 'Under Review')
+            
+            # Severity (Visual Bar)
+            severity = symptoms_data.get('severity_rating', 5)
+            try:
+                sev_val = int(severity)
+                # Create a visual bar: 🔴🔴🔴⚪⚪ (3/5)
+                filled = "🔴" if sev_val >= 7 else "🟠" if sev_val >= 4 else "🟢"
+                empty = "⚪"
+                # Normalize to 1-5 scale for display
+                display_score = max(1, min(5, (sev_val + 1) // 2)) 
+                bar = (filled * display_score) + (empty * (5 - display_score))
+            except:
+                bar = "🟠🟠⚪⚪⚪"
+
+            # 2. Build the Message
+            msg = "📋 *YOUR HEALTH SUMMARY*\n"
+            msg += "_(To be reviewed by Doctor)_\n\n"
+            
+            # Section A: What we found
+            msg += f"👤 *Patient:* 'You' ({assessment.patient_age}y)\n"
+            msg += f"🤒 *Symptoms:* {symptoms_text}\n"
+            msg += f"📊 *Severity:* {bar} ({severity}/10)\n\n"
+            
+            # Section B: AI Insight (Cautious wording)
+            msg += f"🔍 *Potential Issue:* {condition}\n"
+            if obs_data.get('notes'):
+                # Grab first sentence only for brevity
+                note = obs_data['notes'].split('.')[0]
+                msg += f"_{note}_\n"
+            
+            msg += "\n" + "─" * 20 + "\n\n" # Separator line
+            
+            # Section C: Next Steps
+            msg += "✅ *WHAT HAPPENS NEXT?*\n"
+            msg += "1. Your summary has been sent to a doctor.\n"
+            msg += "2. They will review your case shortly.\n"
+            msg += "3. You will receive a prescription or advice here.\n\n"
+            
+            msg += "💬 *Need to add something?*\n"
+            msg += "Just reply to this message, and the doctor will see it."
+
+            return msg
+
+        except Exception as e:
+            logger.error(f"Format error: {e}")
+            # Fallback if formatting fails
+            return (
+                "*Assessment Complete*\n\n"
+                "Your details have been captured and sent to a doctor.\n"
+                "Please wait for their review."
+            )
     
     def _assign_clinician(self, conversation):
         """Assign clinician and notify them"""
@@ -565,13 +563,29 @@ To continue, reply:
             delivery_status='DELIVERED'
         )
         
+        # Ack to patient
         self.twilio.send_message(
             user.whatsapp_id,
-            "Your message has been received. The clinician will respond shortly."
+            "Your message has been added to your file for the clinician to review."
         )
+
+        # Notify clinician that patient added info
+        if conversation.assigned_clinician:
+            try:
+                from apps.clinician.whatsapp_handler import ClinicianWhatsAppHandler
+                clinician_handler = ClinicianWhatsAppHandler()
+                
+                clinician_handler.notify_patient_message(
+                    conversation.assigned_clinician, 
+                    conversation, 
+                    f"(Added info): {message_body}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to notify clinician of pending info: {str(e)}")
     
     def _handle_direct_message(self, user, conversation, message_body):
         """Handle direct patient-clinician messaging."""
+        
         Message.objects.create(
             conversation=conversation,
             sender=user,
@@ -580,6 +594,19 @@ To continue, reply:
             delivery_status='DELIVERED'
         )
         
+        # 2. Check if a clinician is assigned
         if conversation.assigned_clinician:
-            # Notify clinician in dashboard or email
             logger.info(f"New message from patient {user.phone_number} for clinician {conversation.assigned_clinician.phone_number}")
+            
+            # Forward message to clinician
+            try:
+                from apps.clinician.whatsapp_handler import ClinicianWhatsAppHandler
+                
+                clinician_handler = ClinicianWhatsAppHandler()
+                clinician_handler.notify_patient_message(
+                    conversation.assigned_clinician, 
+                    conversation, 
+                    message_body
+                )
+            except Exception as e:
+                logger.error(f"Failed to forward message to clinician: {str(e)}")
