@@ -7,6 +7,8 @@ from apps.clinician.views import ClinicianDashboardViewSet
 from apps.conversations.views import ConversationViewSet
 from apps.assessments.views import AssessmentViewSet
 from apps.authentication.views import AuthViewSet
+from django.conf import settings
+from django.conf.urls.static import static
 
 router = routers.DefaultRouter()
 router.register(r'clinician', ClinicianDashboardViewSet, basename='clinician')
@@ -33,4 +35,6 @@ urlpatterns = [
     
 ]
 
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 

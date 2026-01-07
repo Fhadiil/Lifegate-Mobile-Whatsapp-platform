@@ -12,6 +12,7 @@ from apps.audit.models import AuditLog
 from apps.escalations.models import EscalationAlert
 from integrations.twilio.client import TwilioClient
 from apps.assessments.validator import AssessmentModificationValidator
+from apps.assessments.prescription_generator import PrescriptionPDFGenerator
 
 logger = logging.getLogger('lifegate')
 
@@ -21,6 +22,7 @@ class ClinicianWhatsAppHandler:
     def __init__(self):
         self.twilio = TwilioClient()
         self.validator = AssessmentModificationValidator()
+        self.pdf_generator = PrescriptionPDFGenerator()
     
     # MAIN ENTRY POINT
     
@@ -119,6 +121,9 @@ class ClinicianWhatsAppHandler:
             elif command == 'status':
                 return self._handle_status(clinician, args)
             
+            elif command == 'close' or command == 'discharge':
+                return self._handle_close(clinician, args)
+            
             else:
                 self._send_unknown_command(clinician, command)
                 return True
@@ -147,6 +152,7 @@ class ClinicianWhatsAppHandler:
 • send <id> - Send to patient
 • message <conv_id> <message> - Message patient
 • status <available|busy|offline> - Update status
+• close <id> - Discharge patient (End Session)
 
 *EXAMPLES:*
 • pending
@@ -719,9 +725,21 @@ Type *help* anytime for this message."""
                 assessment, clinician, final_recs, final_meds, final_monitoring, notes
             )
             
+            pdf_buffer = self.pdf_generator.generate_prescription(
+                assessment, 
+                clinician, 
+                mod_session
+            )
+            
+            pdf_filename = f"prescription_{str(assessment.id)[:8].upper()}.pdf"
+            
+            pdf_path = self._save_prescription_pdf(assessment, pdf_buffer, pdf_filename)
+            
             # Send to patient
             logger.info(f"[CLINICIAN] Sending to patient: {assessment.patient.phone_number}")
             self.twilio.send_message(assessment.patient.whatsapp_id, formatted_message)
+            
+            self._send_pdf_to_patient(assessment.patient.whatsapp_id, pdf_buffer, pdf_filename)
             
             # Update assessment
             assessment.status = 'SENT_TO_PATIENT'
@@ -742,6 +760,8 @@ Type *help* anytime for this message."""
                 content=formatted_message,
                 delivery_status='SENT'
             )
+            
+            self._save_prescription_record(assessment, clinician, mod_session, pdf_path)
             
             message = f"✅ *ASSESSMENT SENT*\n\n"
             message += f"Patient: {assessment.patient.phone_number}\n"
@@ -764,18 +784,15 @@ Type *help* anytime for this message."""
     
     def _handle_message(self, clinician, args):
         """
-        Send message to patient.
-        
-        Usage: message <conversation_id> <message>
-        Example: message conv-abc Hello, how are you?
+        Send message to patient (Smart ID Lookup).
+        Accepts EITHER Conversation ID OR Assessment ID.
         """
-        
         try:
             if not args.strip():
                 self.twilio.send_message(
                     clinician.whatsapp_id,
-                    "*USAGE:* message <conv_id> <message>\n\n"
-                    "Example: message conv-abc Hello"
+                    "*USAGE:* message <id> <text>\n\n"
+                    "Example: message abc-123 Hello there"
                 )
                 return False
             
@@ -783,23 +800,45 @@ Type *help* anytime for this message."""
             if len(parts) < 2:
                 self.twilio.send_message(
                     clinician.whatsapp_id,
-                    "*USAGE:* message <conv_id> <message>"
+                    "Missing message text.\nUsage: message <id> <text>"
                 )
                 return False
             
-            conv_id = parts[0]
+            input_id = parts[0]
             msg_text = parts[1]
             
-            logger.info(f"[CLINICIAN] Message to {conv_id}: {msg_text[:50]}")
+            conversation = None
+
             
-            # Find conversation
-            conversation = ConversationSession.objects.get(
-                id__startswith=conv_id,
+            # 1. Try finding by Conversation ID
+            conversation = ConversationSession.objects.filter(
+                id__startswith=input_id,
                 assigned_clinician=clinician
-            )
+            ).first()
+
+            # 2. If not found, try finding by Assessment ID
+            if not conversation:
+                assessment = AIAssessment.objects.filter(
+                    id__startswith=input_id,
+                    conversation__assigned_clinician=clinician
+                ).first()
+                if assessment:
+                    conversation = assessment.conversation
+
+            # 3. If still not found, fail
+            if not conversation:
+                print(f"[CLINICIAN] ID not found: {input_id}")
+                self.twilio.send_message(
+                    clinician.whatsapp_id,
+                    f"Context not found for ID: {input_id}\n"
+                    "Check the ID and try again."
+                )
+                return False
+
+
+            logger.info(f"[CLINICIAN] Message to {conversation.patient.phone_number}: {msg_text[:50]}")
             
             # Send to patient
-            logger.info(f"[CLINICIAN] Sending to {conversation.patient.phone_number}")
             self.twilio.send_message(conversation.patient.whatsapp_id, msg_text)
             
             # Save message
@@ -811,6 +850,10 @@ Type *help* anytime for this message."""
                 delivery_status='SENT'
             )
             
+            # Update conversation timestamp so it stays "Active"
+            conversation.updated_at = timezone.now()
+            conversation.save()
+            
             # Log
             AuditLog.objects.create(
                 user=clinician,
@@ -819,28 +862,99 @@ Type *help* anytime for this message."""
                 resource_id=str(message_record.id),
                 description=f'Message sent via WhatsApp'
             )
+            logger.info(f"[CLINICIAN] Message sent to patient {conversation.patient.phone_number}")
             
-            self.twilio.send_message(
-                clinician.whatsapp_id,
-                "✅ *MESSAGE SENT*"
-            )
-            
-            logger.info(f"[CLINICIAN] Message sent")
             return True
-        
-        except ConversationSession.DoesNotExist:
-            print(f"[CLINICIAN] Conversation not found: {args}")
-            self.twilio.send_message(
-                clinician.whatsapp_id,
-                "Conversation not found"
-            )
-            return False
         
         except Exception as e:
             print(f"[CLINICIAN] Error in message: {str(e)}", exc_info=True)
             self._send_to_clinician(clinician, "Error sending message")
             return False
     
+   # COMMAND: CLOSE / DISCHARGE
+
+    def _handle_close(self, clinician, args):
+        """
+        Close/Discharge a patient session.
+        Allows the patient to start over with a new complaint.
+        """
+        try:
+            if not args.strip():
+                self.twilio.send_message(
+                    clinician.whatsapp_id,
+                    "*USAGE:* close <id>\n\n"
+                    "Example: close abc-123\n"
+                    "(Ends the session so patient can start new)"
+                )
+                return False
+
+            input_id = args.split()[0]
+            conversation = None
+
+            # 1. Try Conversation ID
+            conversation = ConversationSession.objects.filter(
+                id__startswith=input_id,
+                assigned_clinician=clinician
+            ).first()
+
+            # 2. Try Assessment ID
+            if not conversation:
+                assessment = AIAssessment.objects.filter(
+                    id__startswith=input_id,
+                    conversation__assigned_clinician=clinician
+                ).first()
+                if assessment:
+                    conversation = assessment.conversation
+
+            if not conversation:
+                self.twilio.send_message(clinician.whatsapp_id, "❌ Session not found for that ID")
+                return False
+
+            
+            # 1. Close Conversation
+            conversation.status = 'COMPLETED'
+            conversation.closed_at = timezone.now()
+            conversation.save()
+
+            # 2. Close Patient Assignment (Remove from Active List)
+            PatientAssignment.objects.filter(
+                conversation=conversation,
+                clinician=clinician,
+                status='ACTIVE'
+            ).update(status='COMPLETED')
+
+            # 3. Update Availability (if needed)
+            availability, _ = ClinicianAvailability.objects.get_or_create(
+                clinician=clinician
+            )
+            if availability.status == 'BUSY':
+                availability.status = 'AVAILABLE'
+                availability.save()
+
+            # 4. Notify Patient
+            self.twilio.send_message(
+                conversation.patient.whatsapp_id,
+                "*SESSION CLOSED*\n\n"
+                f"Dr. {clinician.last_name} has closed this consultation.\n\n"
+                "If you have a new health concern in the future, just reply *Hi* to start a new assessment. 👋"
+            )
+
+            # 5. Notify Clinician
+            patient_name = conversation.patient.first_name or "Patient"
+            self.twilio.send_message(
+                clinician.whatsapp_id,
+                f"✅ Session closed for {patient_name}.\n"
+                "They have been removed from your active list."
+            )
+            
+            logger.info(f"[CLINICIAN] Discharged patient {conversation.patient.phone_number}")
+            return True
+
+        except Exception as e:
+            print(f"[CLINICIAN] Error closing session: {str(e)}", exc_info=True)
+            self._send_to_clinician(clinician, "Error closing session")
+            return False
+   
    
     # COMMAND: STATUS
     
@@ -1831,3 +1945,114 @@ Type *help* anytime for this message."""
             print(f"[CLINICIAN] Error in modify: {str(e)}", exc_info=True)
             self.twilio.send_message(clinician.whatsapp_id, "Error")
             return False
+        
+    # PDF SENDING METHODS 
+    
+    def _send_pdf_to_patient(self, patient_whatsapp_id, pdf_buffer, filename):
+        """Send PDF document via Twilio."""
+        try:
+            pdf_buffer.seek(0)
+            
+            # 1. Save to Django media storage
+            from django.core.files.base import ContentFile
+            from django.core.files.storage import default_storage
+            
+            # This saves to /media/prescriptions/filename.pdf
+            file_path = f"prescriptions/{filename}"
+            
+            # If file exists, delete it first to ensure overwrite (optional)
+            if default_storage.exists(file_path):
+                default_storage.delete(file_path)
+                
+            saved_path = default_storage.save(file_path, ContentFile(pdf_buffer.read()))
+            
+            # 2. Construct Public URL (Critical for Twilio)
+            from django.conf import settings
+            
+            # Ensure SITE_URL is set in settings.py (e.g. your Ngrok URL)
+            # Do NOT use localhost
+            base_url = getattr(settings, 'SITE_URL', '').rstrip('/')
+            if not base_url:
+                logger.error("[PDF] SITE_URL not set in settings. Cannot send media.")
+                return None
+                
+            pdf_url = f"{base_url}{settings.MEDIA_URL}{saved_path}"
+            
+            logger.info(f"[PDF] Public URL generated: {pdf_url}")
+            
+            # 3. Send via Twilio
+            message_text = "📄 *Official Prescription*\nPlease present this document at the pharmacy."
+            
+            self.twilio.send_media_message(
+                patient_whatsapp_id,
+                pdf_url,
+                message_text
+            )
+            
+            return saved_path
+            
+        except Exception as e:
+            logger.error(f"[PDF] Error sending PDF: {str(e)}", exc_info=True)
+            self.twilio.send_message(
+                patient_whatsapp_id,
+                "Note: Digital prescription generated but could not be attached. "
+                "Please contact support if needed."
+            )
+            return None
+    
+    def _save_prescription_pdf(self, assessment, pdf_buffer, filename):
+        """
+        Save prescription PDF to media storage for tracking and retrieval.
+        """
+        
+        try:
+            from django.core.files.base import ContentFile
+            from django.core.files.storage import default_storage
+            
+            # Reset buffer to start
+            pdf_buffer.seek(0)
+            
+            # Create file path
+            file_path = f"prescriptions/{assessment.patient.phone_number}/{filename}"
+            
+            # Save file
+            saved_path = default_storage.save(file_path, ContentFile(pdf_buffer.read()))
+            
+            logger.info(f"[PDF] Prescription saved: {saved_path}")
+            
+            return saved_path
+        
+        except Exception as e:
+            logger.error(f"[PDF] Error saving prescription: {str(e)}")
+            return None
+    
+    def _save_prescription_record(self, assessment, clinician, mod_session, pdf_path):
+        """
+        Save prescription record to database for audit trail.
+        """
+        
+        try:
+            # Import Prescription model (we'll create it)
+            from apps.assessments.models import Prescription
+            
+            prescription = Prescription.objects.create(
+                assessment=assessment,
+                patient=assessment.patient,
+                clinician=clinician,
+                pdf_file=pdf_path,
+                medications=mod_session.modified_otc_suggestions or assessment.otc_suggestions or {},
+                recommendations=mod_session.modified_recommendations or assessment.preliminary_recommendations or {},
+                warnings=mod_session.modified_monitoring_advice or assessment.monitoring_advice or {},
+                status='SENT'
+            )
+            
+            logger.info(f"[PDF] Prescription record created: {prescription.id}")
+            
+            return prescription
+        
+        except ImportError:
+            logger.warning("[PDF] Prescription model not found - skipping record save")
+            return None
+        except Exception as e:
+            logger.error(f"[PDF] Error saving prescription record: {str(e)}")
+            return None
