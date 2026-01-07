@@ -1,3 +1,6 @@
+import requests
+import tempfile
+import os
 import logging
 from django.conf import settings
 from groq import Groq
@@ -183,3 +186,80 @@ class GroqService:
             return json.loads(response)
         except:
             return []
+        
+        
+    def transcribe_audio_from_url(self, media_url):
+        """
+        Download audio from Twilio Media URL and transcribe using Groq Whisper.
+        
+        Args:
+            media_url (str): Twilio MediaUrl0
+        
+        Returns:
+            str: Transcribed text
+        """
+        audio_path = None
+        try:
+            # Twilio media requires basic auth
+            auth = (
+                settings.TWILIO_ACCOUNT_SID,
+                settings.TWILIO_AUTH_TOKEN
+            )
+            logger.info("Downloading voice note from Twilio")
+
+            response = requests.get(media_url, auth=auth, timeout=15)
+            response.raise_for_status()
+
+            # Save audio temporarily
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp:
+                tmp.write(response.content)
+                audio_path = tmp.name
+
+            logger.info("Sending audio to Groq Whisper for transcription")
+
+            with open(audio_path, "rb") as audio_file:
+                transcription = self.client.audio.transcriptions.create(
+                    file=audio_file,
+                    model="whisper-large-v3",
+                    language="en"
+                )
+            return transcription.text
+
+        except Exception as e:
+            logger.error(f"Groq Whisper transcription failed: {e}")
+            raise
+
+        finally:
+            # Cleanup temp file
+            try:
+                if audio_path and os.path.exists(audio_path):
+                    os.remove(audio_path)
+            except Exception:
+                pass
+
+    def transcribe_audio(self, media_url):
+        """
+        Use Groq Whisper to transcribe audio from a URL by downloading it and transcribing.
+        Returns the text transcription.
+        """
+        try:
+            return self.transcribe_audio_from_url(media_url)
+        except Exception as e:
+            logger.error(f"Groq transcription error: {e}")
+            return None
+
+    def transcribe_audio_from_bytes(self, audio_bytes):
+        """
+        Transcribe audio provided as bytes using Groq Whisper.
+        """
+        import io
+
+        audio_file = io.BytesIO(audio_bytes)
+        audio_file.name = "voice.ogg"  # WhatsApp voice format
+
+        response = self.client.audio.transcriptions.create(
+            file=audio_file,
+            model="whisper-large-v3"
+        )
+
+        return response.text

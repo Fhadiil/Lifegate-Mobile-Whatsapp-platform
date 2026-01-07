@@ -1,0 +1,10 @@
+requests
+groq
+python-dotenv
+Django
+djangorestframework
+twilio
+psycopg2-binary
+drf-spectacular
+djangorestframework-simplejwt
+django-cors-headers

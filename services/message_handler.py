@@ -1,7 +1,9 @@
+from pydoc import text
+import requests
 import logging
 import json
 from datetime import datetime
-from django.utils import timezone
+from django.utils import timezone 
 from django.conf import settings
 from apps.authentication.models import User, PatientProfile, ClinicianProfile
 from apps.conversations.models import ConversationSession, Message, TriageQuestion
@@ -11,6 +13,8 @@ from apps.audit.models import AuditLog
 from integrations.twilio.client import TwilioClient
 from services.groq_service import GroqService
 from services.ai_engine import AIEngine
+from requests.auth import HTTPBasicAuth
+
 
 logger = logging.getLogger('lifegate')
 
@@ -67,10 +71,28 @@ To continue, reply:
         Args:
             incoming_data: dict with from, body, etc from Twilio
         """
+        #debug
+        print("Incoming webhook received!")
+        print(incoming_data)
         try:
             whatsapp_id = incoming_data.get('From')
+            # Check if message contains media (voice note)
             message_body = incoming_data.get('Body', '').strip()
-            
+            media_url = incoming_data.get('MediaUrl0')
+            media_type = incoming_data.get('MediaContentType0')
+
+            if media_url:
+                print("🎤 Voice message detected")
+                transcription = self._transcribe_audio(media_url)
+
+                if transcription:
+                    message_body = self._normalize_transcription(transcription)
+                else:
+                    message_body = ""
+
+            else:
+                message_body = incoming_data.get('Body', '').strip() or "[Empty message]"
+
             logger.info(f"Processing message from {whatsapp_id}: {message_body[:50]}")
             
             # Step 1: Get or create user
@@ -86,11 +108,14 @@ To continue, reply:
             conversation = self._get_or_create_conversation(user)
             
             # Step 3: Save incoming message
+            # ✅ Ensure Message model has media_url and media_type fields
             message = Message.objects.create(
                 conversation=conversation,
                 sender=user,
                 message_type='PATIENT',
                 content=message_body,
+                media_url=media_url,
+                media_type=media_type,
                 delivery_status='DELIVERED'
             )
             
@@ -125,19 +150,48 @@ To continue, reply:
             return True
             
         except Exception as e:
-            print(f"Error processing message: {str(e)}", exc_info=True)
+            logger.exception(f"Error processing message from {whatsapp_id}")
             return False
-    
+        
+    # ✅ Updated _transcribe_audio method
+    from requests.auth import HTTPBasicAuth
+
+    def _transcribe_audio(self, media_url):
+        print("🎧 Downloading voice note from Twilio...")
+
+        try:
+            response = requests.get(
+                media_url,
+                auth=(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN),
+                timeout=15
+            )
+            response.raise_for_status()
+
+            audio_bytes = response.content
+            print(f"✅ Audio downloaded ({len(audio_bytes)} bytes)")
+
+            print("🎧 Sending audio to Groq Whisper...")
+            transcription = self.groq.transcribe_audio(media_url)
+
+
+            print(f"📝 Transcription result: {transcription}")
+            return transcription.strip()
+
+        except Exception as e:
+            print("❌ Voice transcription failed")
+            import traceback
+            traceback.print_exc()
+            return ""
+
+
+
+    # Rest of your code remains the same
     def _get_or_create_user(self, whatsapp_id):
         """Auto-register patient if first time."""
         try:
-            # Extract phone from whatsapp_id (format: whatsapp:+1234567890)
             phone = whatsapp_id.replace('whatsapp:', '')
-            
             user = User.objects.filter(phone_number=phone).first()
-            
             if not user:
-                # Auto-register new patient
                 username = f"patient_{phone.replace('+', '')}"
                 user = User.objects.create_user(
                     username=username,
@@ -145,16 +199,15 @@ To continue, reply:
                     whatsapp_id=whatsapp_id,
                     role='PATIENT'
                 )
-                
-                # Create patient profile
                 PatientProfile.objects.create(user=user)
-                
                 return user, True
-            
             return user, False
         except Exception as e:
             print(f"Error in _get_or_create_user: {str(e)}")
             return None, False
+    
+    # ... rest of your methods remain unchanged
+
     
     def _get_or_create_conversation(self, user):
         """Get active conversation or create new one."""
@@ -361,6 +414,14 @@ To continue, reply:
     def _handle_triage_response(self, user, conversation, message_body):
         """Process triage question response."""
         try:
+            # ✅ GUARD CLAUSE: Check for empty message
+            if not message_body or message_body.strip() == "":
+                self.twilio.send_message(
+                    user.whatsapp_id,
+                    "I didn't catch that. Could you please repeat your answer?"
+                )
+                return
+            
             # Get last unanswered question
             last_question = conversation.triage_questions.filter(
                 response_processed=False
@@ -379,32 +440,67 @@ To continue, reply:
                 self._generate_assessment(user, conversation)
             else:
                 # Generate next question
-                next_question = self.ai_engine.generate_next_question(
-                    conversation=conversation,
-                    current_response=message_body
-                )
-                
-                triage_q = TriageQuestion.objects.create(
-                    conversation=conversation,
-                    question_text=next_question,
-                    question_type='OPEN_ENDED',
-                    question_order=conversation.ai_questions_asked + 1
-                )
-                
-                self.twilio.send_message(user.whatsapp_id, next_question)
-                Message.objects.create(
-                    conversation=conversation,
-                    sender=None,
-                    message_type='AI_QUERY',
-                    content=next_question,
-                    delivery_status='SENT'
-                )
+                try:
+                    next_question = self.ai_engine.generate_next_question(
+                        conversation=conversation,
+                        current_response=message_body
+                    )
+                    
+                    # ✅ CRITICAL VALIDATION: Check if AI returned a valid question
+                    if not next_question or not next_question.strip():
+                        print("❌ AI returned empty question - using fallback")
+                        next_question = "Can you tell me more about your symptoms? Any other details that might help?"
+                    
+                    # Now safe to save to database
+                    triage_q = TriageQuestion.objects.create(
+                        conversation=conversation,
+                        question_text=next_question,
+                        question_type='OPEN_ENDED',
+                        question_order=conversation.ai_questions_asked + 1
+                    )
+                    
+                    self.twilio.send_message(user.whatsapp_id, next_question)
+                    Message.objects.create(
+                        conversation=conversation,
+                        sender=None,
+                        message_type='AI_QUERY',
+                        content=next_question,
+                        delivery_status='SENT'
+                    )
+                    
+                except Exception as ai_error:
+                    print(f"❌ AI question generation failed: {str(ai_error)}")
+                    # Use fallback question
+                    fallback_question = "Thank you. Can you describe any other symptoms you're experiencing?"
+                    
+                    triage_q = TriageQuestion.objects.create(
+                        conversation=conversation,
+                        question_text=fallback_question,
+                        question_type='OPEN_ENDED',
+                        question_order=conversation.ai_questions_asked + 1
+                    )
+                    
+                    self.twilio.send_message(user.whatsapp_id, fallback_question)
+                    Message.objects.create(
+                        conversation=conversation,
+                        sender=None,
+                        message_type='AI_QUERY',
+                        content=fallback_question,
+                        delivery_status='SENT'
+                    )
             
             conversation.save()
+            
         except Exception as e:
             print(f"Error handling triage response: {str(e)}")
-            self.twilio.send_message(user.whatsapp_id, "An error occurred. Please try again.")
-    
+            import traceback
+            traceback.print_exc()
+            self.twilio.send_message(
+                user.whatsapp_id,
+                "An error occurred. Please try again."
+            )    
+
+
     def _generate_assessment(self, user, conversation):
         """Generate final AI assessment."""
         try:
@@ -507,3 +603,34 @@ To continue, reply:
         if conversation.assigned_clinician:
             # Notify clinician in dashboard or email
             logger.info(f"New message from patient {user.phone_number} for clinician {conversation.assigned_clinician.phone_number}")
+            
+            if not message_body:
+                self.twilio.send_message(
+                    user.whatsapp_id,
+                    "Sorry, I couldn't understand the voice message. Please try again or send text."
+                )
+                return True
+    
+    def _normalize_transcription(self, text):
+        text = text.lower().strip()
+    
+        # Allowed gender answers
+        valid_genders = ["male", "female", "other"]
+
+        # Map common mis-hearings to intended genders
+        mapping = {
+            "emil": "male",
+            "miel": "male",
+            "meal": "male",
+        }
+    
+        # First, fix known mis-hearings
+        if text in mapping:
+            text = mapping[text]
+    
+        # Then, if the text is a valid gender, keep it
+        if text in valid_genders:
+            return text
+
+        # Otherwise, return raw text (user might literally say "meal")
+        return text

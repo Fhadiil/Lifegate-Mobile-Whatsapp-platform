@@ -84,10 +84,18 @@ class Message(models.Model):
     sender = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='sent_messages')
     message_type = models.CharField(max_length=20, choices=MESSAGE_TYPE_CHOICES)
     content = models.TextField()
+    
+    # Thatguysenpai added THESE
+    #media_url = models.URLField(blank=True, null=True)
+    media_type = models.CharField(max_length=50, blank=True, null=True)
+
+    delivery_status = models.CharField(max_length=20, default="DELIVERED")
+    created_at = models.DateTimeField(auto_now_add=True)
     media_url = models.URLField(blank=True, null=True)
     delivery_status = models.CharField(
         max_length=20, choices=DELIVERY_STATUS_CHOICES, default='PENDING'
     )
+    
     twilio_message_sid = models.CharField(max_length=100, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     delivered_at = models.DateTimeField(null=True, blank=True)
