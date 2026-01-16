@@ -59,6 +59,7 @@ INSTALLED_APPS = [
     'apps.audit',
     'apps.system',
     'apps.admin_panel',
+    'apps.subscriptions',
 ]
 
 MIDDLEWARE = [
@@ -224,3 +225,8 @@ PDF_SETTINGS = {
     'page_size': 'letter',  
     'font_size': 10,
 }
+
+# Flutterwave Configuration
+FLUTTERWAVE_PUBLIC_KEY = os.getenv('FLUTTERWAVE_PUBLIC_KEY')
+FLUTTERWAVE_SECRET_KEY = os.getenv('FLUTTERWAVE_SECRET_KEY')
+FLUTTERWAVE_SECRET_HASH = os.getenv('FLUTTERWAVE_SECRET_HASH') # Important for webhooks

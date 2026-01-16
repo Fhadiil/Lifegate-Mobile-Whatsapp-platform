@@ -41,6 +41,7 @@ class ConversationSession(models.Model):
     first_clinician_response_at = models.DateTimeField(null=True, blank=True)
     closed_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
+    is_paid = models.BooleanField(default=False)
     
     class Meta:
         ordering = ['-created_at']

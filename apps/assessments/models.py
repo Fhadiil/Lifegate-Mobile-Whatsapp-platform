@@ -13,6 +13,7 @@ class AIAssessment(models.Model):
     STATUS_CHOICES = [
         ('DRAFT', 'Draft'),
         ('GENERATED', 'Generated'),
+        ('PENDING_PAYMENT', 'Pending Payment'),
         ('PENDING_REVIEW', 'Pending Review'),
         ('APPROVED', 'Approved'),
         ('MODIFIED', 'Modified'),

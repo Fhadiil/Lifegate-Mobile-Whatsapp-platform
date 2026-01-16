@@ -63,11 +63,13 @@ class PatientProfile(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
+    consultation_credits = models.IntegerField(default=0)
+    
     class Meta:
         verbose_name_plural = "Patient Profiles"
     
     def __str__(self):
-        return f"Profile: {self.user.phone_number}"
+        return f"Profile: {self.user.phone_number} ({self.consultation_credits} credits)"
 
 
 class ClinicianProfile(models.Model):

@@ -197,7 +197,7 @@ Type *help* anytime for this message."""
                 
                 severity_emoji = '🔴' if severity >= 8 else '🟡' if severity >= 5 else '🟢'
                 
-                patient_name = assessment.patient.first_name or assessment.patient.phone_number
+                patient_name = f"patient {idx}" # anonymized for privacy
                 chief = assessment.chief_complaint[:40] + '...' if len(assessment.chief_complaint) > 40 else assessment.chief_complaint
                 
                 message += f"{idx}. *{patient_name}*\n"
@@ -248,7 +248,7 @@ Type *help* anytime for this message."""
             for escalation in escalations:
                 severity_emoji = '🔴' if escalation.alert_severity == 'CRITICAL' else '🟠'
                 
-                message += f"{severity_emoji} *{escalation.conversation.patient.phone_number}*\n"
+                message += f"{severity_emoji} \n"
                 message += f"   {escalation.alert_message[:60]}\n"
                 message += f"   Status: {escalation.alert_status}\n\n"
             
@@ -284,7 +284,7 @@ Type *help* anytime for this message."""
             message = " *YOUR ACTIVE PATIENTS* ({} total)\n\n".format(assignments.count())
             
             for idx, assignment in enumerate(assignments, 1):
-                patient_name = assignment.patient.first_name or assignment.patient.phone_number
+                patient_name = f"patient {idx}" # anonymized for privacy
                 chief = assignment.conversation.chief_complaint[:35] + '...' if len(assignment.conversation.chief_complaint) > 35 else assignment.conversation.chief_complaint
                 
                 message += f"{idx}. *{patient_name}*\n"
@@ -356,7 +356,6 @@ Type *help* anytime for this message."""
             )
             
             message = f"✅ *ASSESSMENT APPROVED*\n\n"
-            message += f"Patient: {assessment.patient.phone_number}\n"
             message += f"Chief: {assessment.chief_complaint[:50]}\n\n"
             message += f"👉 Next: send {str(assessment.id)[:12]}\n"
             message += f"(This sends assessment to patient)"
@@ -432,7 +431,6 @@ Type *help* anytime for this message."""
             )
             
             message = f"*ASSESSMENT REJECTED*\n\n"
-            message += f"Patient: {assessment.patient.phone_number}\n\n"
             message += "Patient will be asked for more information."
             
             self._send_to_clinician(clinician, message)
@@ -1101,7 +1099,6 @@ Type *help* anytime for this message."""
             self.twilio.send_message(
                 clinician.whatsapp_id,
                 f"📝 *MODIFYING ASSESSMENT*\n\n"
-                f"Patient: {assessment.patient.phone_number}\n"
                 f"Chief: {assessment.chief_complaint[:50]}\n\n"
                 f"{summary}\n\n"
                 f"Session ID: {str(mod_session.id)[:12]}"
@@ -1471,7 +1468,6 @@ Type *help* anytime for this message."""
             )
             
             message = f"✅ *ASSESSMENT MODIFIED*\n\n"
-            message += f"Patient: {assessment.patient.phone_number}\n"
             message += f"Status: MODIFIED\n\n"
             message += f"👉 Next: send {str(assessment.id)[:12]}\n"
             message += f"(to send modified version to patient)"
@@ -1727,7 +1723,7 @@ Type *help* anytime for this message."""
 
             parts.append(f"ID: {str(assessment.id)}")
             parts.append(f"Generated: {gen_str} | Confidence: {confidence}%")
-            parts.append(f"Patient: {assessment.patient.first_name or assessment.patient.phone_number}")
+            parts.append(f"Patient: {assessment.patient_gender or 'N/A'}, Age {assessment.patient_age or 'N/A'}")
             parts.append(f"Chief complaint: {assessment.chief_complaint}")
 
             # Symptoms
@@ -1825,8 +1821,7 @@ Type *help* anytime for this message."""
             patient = conversation.patient
             
             message = f"🆕 *NEW PATIENT ASSIGNMENT*\n\n"
-            message += f"Patient: {patient.phone_number}\n"
-            message += f"Name: {patient.first_name or 'N/A'} {patient.last_name or 'N/A'}\n"
+            message += f"Patient: {patient.gender or 'N/A'}, Age {patient.age or 'N/A'}\n"
             message += f"Chief Complaint: {conversation.chief_complaint[:60]}\n\n"
             message += "👉 *ACTIONS:*\n"
             message += "pending - View pending assessments\n"
@@ -1848,8 +1843,6 @@ Type *help* anytime for this message."""
             patient = conversation.patient
             
             message = f"💬 *NEW MESSAGE FROM PATIENT*\n\n"
-            message += f"Patient: {patient.phone_number}\n"
-            message += f"Name: {patient.first_name or 'N/A'}\n\n"
             message += f"Message:\n\"{patient_message}\"\n\n"
             message += "👉 *REPLY VIA WHATSAPP:*\n"
             message += f"message {str(conversation.id)[:12]} <your message>\n\n"
@@ -1872,7 +1865,6 @@ Type *help* anytime for this message."""
             patient = conversation.patient
             
             message = f"🚨 *EMERGENCY ESCALATION*\n\n"
-            message += f"Patient: {patient.phone_number}\n"
             message += f"Alert: {escalation.alert_message[:60]}\n"
             message += f"Severity: {escalation.alert_severity}\n\n"
             message += "Please respond immediately."
@@ -1920,7 +1912,6 @@ Type *help* anytime for this message."""
             # For now, show the modification UI on dashboard instead
             
             message = f"📝 *MODIFY ASSESSMENT*\n\n"
-            message += f"Patient: {assessment.patient.phone_number}\n"
             message += f"Chief: {assessment.chief_complaint[:50]}\n\n"
             message += "⚠️ For detailed modifications, use the WEB DASHBOARD:\n"
             message += "👉 http://localhost:3000/\n\n"
