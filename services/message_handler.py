@@ -21,6 +21,7 @@ from apps.subscriptions.models import PatientSubscription, CreditPackage, Paymen
 from services.workflow_service import finalize_consultation_flow
 
 
+
 logger = logging.getLogger('lifegate')
 
 
@@ -70,59 +71,51 @@ To continue, reply:
         self.ai_engine = AIEngine()
     
     def process_incoming_message(self, incoming_data):
-        """
-        Main webhook handler for incoming WhatsApp messages.
-        
-        Args:
-            incoming_data: dict with from, body, etc from Twilio
-        """
-        #debug
         print("Incoming webhook received!")
         print(incoming_data)
-        
+
         self.incoming_data = incoming_data
-        
+
         try:
             whatsapp_id = incoming_data.get('From')
-            # Check if message contains media (voice note)
-            message_body = self._normalize_transcription(incoming_data['Body'])
-           # message_body = incoming_data.get('Body', '').strip()
+
+            # Normalize body first
+            message_body = self._normalize_transcription(incoming_data.get('Body', ''))
             media_url = incoming_data.get('MediaUrl0')
             media_type = incoming_data.get('MediaContentType0')
 
             if media_url:
                 print("🎤 Voice message detected")
                 transcription = self._transcribe_audio(media_url)
-
-                if transcription:
-                   message_body = self._normalize_transcription(transcription)
-
-                else:
-                    message_body = ""
-
+                message_body = self._normalize_transcription(transcription) if transcription else ""
             else:
-                message_body = incoming_data.get('Body', '').strip() or "[Empty message]"
+                message_body = message_body.strip() or "[Empty message]"
 
             logger.info(f"Processing message from {whatsapp_id}: {message_body[:50]}")
-            
+
             # Step 1: Get or create user
             user, created = self._get_or_create_user(whatsapp_id)
             if not user:
-                print(f"Failed to create user for {whatsapp_id}")
+                logger.error(f"Failed to create user for {whatsapp_id}")
                 return False
-            
+
             if created:
                 logger.info(f"Auto-registered new patient: {user.phone_number}")
-                
+
             conversation = self._get_or_create_conversation(user)
-            
-            # Step 2: Check if payment is required
-            if self._handle_package_selection(user, message_body):
+
+            # SESSION INTERCEPTION
+            if conversation.status == 'INITIAL':
+                self._send_mode_selection(user, conversation)
                 return True
-            
+
+            # Step 2: Payment interception (clinician path only)
+            if conversation.mode == 'CLINICIAN':
+                if self._handle_package_selection(user, message_body):
+                    return True
+
             # Step 3: Save incoming message
-            # ✅ Ensure Message model has media_url and media_type fields
-            message = Message.objects.create(
+            Message.objects.create(
                 conversation=conversation,
                 sender=user,
                 message_type='PATIENT',
@@ -131,42 +124,92 @@ To continue, reply:
                 media_type=media_type,
                 delivery_status='DELIVERED'
             )
-            
-            # Step 4: Log action
+
             AuditLog.objects.create(
                 user=user,
                 action_type='MESSAGE_RECEIVED',
                 resource_type='Message',
-                resource_id=str(message.id),
+                resource_id=str(conversation.id),
                 description=f"Patient sent message: {message_body[:100]}"
             )
-            
-            # Step 5: Route based on conversation status
-            if conversation.status == 'INITIAL':
-                self._send_welcome_screen(user, conversation)
-            
+
+            # Step 4: Route by status
+            if conversation.status == 'AWAITING_MODE_SELECTION':
+                self._handle_mode_selection(user, conversation, message_body)
+
             elif conversation.status == 'AWAITING_ACCEPTANCE':
                 self._handle_acceptance(user, conversation, message_body)
-            
+
             elif conversation.status == 'AWAITING_PATIENT_PROFILE':
                 self._handle_profile_collection(user, conversation, message_body)
-            
+
             elif conversation.status == 'AI_TRIAGE_IN_PROGRESS':
                 self._handle_triage_response(user, conversation, message_body)
-            
+
+            elif conversation.status == 'AI_CHAT':
+                self._handle_ai_chat(user, conversation, message_body)
+
             elif conversation.status == 'PENDING_CLINICIAN_REVIEW':
                 self._handle_pending_review(user, conversation, message_body)
-            
+
             elif conversation.status == 'DIRECT_MESSAGING':
                 self._handle_direct_message(user, conversation, message_body)
-            
+
+            elif conversation.status == 'AI_CHAT_ESCALATION_OFFERED':
+                self._handle_ai_escalation_decision(user, conversation, message_body)
+
             return True
-            
+
         except Exception as e:
-            logger.exception(f"Error processing message from {whatsapp_id}")
+            logger.exception(f"Error processing message from {incoming_data.get('From')}")
             return False
-        
-    
+            
+            # Handle mode selection
+    def _send_mode_selection(self, user, conversation):
+        msg = (
+            "👋 *Welcome to Lifegate*\n\n"
+            "How would you like to proceed?\n\n"
+            "1️⃣ *Chat with Medical AI* (Free)\n"
+            "_General health questions, guidance, no prescriptions_\n\n"
+            "2️⃣ *Talk to a Clinician* (Paid)\n"
+            "_Doctor review, prescriptions, follow-up_\n\n"
+            "👉 Reply *1* or *2*"
+        )
+
+        self.twilio.send_message(user.whatsapp_id, msg)
+
+        conversation.status = 'AWAITING_MODE_SELECTION'
+        conversation.save()
+
+        # Handle mode selection(NEW)
+    def _handle_mode_selection(self, user, conversation, message_body):
+        choice = message_body.strip()
+
+        if choice == '1':
+            conversation.mode = 'AI_ONLY'
+            conversation.status = 'AI_CHAT'
+            conversation.save()
+
+            self.twilio.send_message(
+                user.whatsapp_id,
+                "🤖 *AI Chat Mode Activated*\n\n"
+                "You can ask general health questions.\n"
+                "No prescriptions or diagnoses.\n\n"
+                "How can I help you today?"
+            )
+            return
+
+        elif choice == '2':
+            conversation.mode = 'CLINICIAN'
+            conversation.status = 'AWAITING_ACCEPTANCE'
+            conversation.save()
+
+            self._send_welcome_screen(user, conversation)
+            return
+
+        self.twilio.send_message(user.whatsapp_id, "Please reply with *1* or *2*.")
+
+
     # method to handle package selection
     def _handle_package_selection(self, user, message_body):
         """
@@ -194,8 +237,58 @@ To continue, reply:
             return False    
     
     
-    # ✅ Updated _transcribe_audio method
-    from requests.auth import HTTPBasicAuth
+
+
+        # Handle AI chat(NEW)
+    def _handle_ai_chat(self, user, conversation, message_body):
+        """
+        AI-only chat mode.
+        No prescriptions, no clinician, no payments.
+        """
+
+        # 1. Check for red flags
+        if self._check_red_flags(message_body):
+            self.twilio.send_message(
+                user.whatsapp_id,
+                "⚠️ This sounds like something a clinician should review.\n\n"
+                "Would you like to talk to a doctor? (Paid)\n"
+                "Reply *YES* to proceed or *NO* to continue with general questions."
+            )
+            conversation.status = 'AI_CHAT_ESCALATION_OFFERED'
+            conversation.save()
+            return
+
+        # 2. Normal AI response
+        reply = self.ai_engine.general_health_chat(message_body)
+        self.twilio.send_message(user.whatsapp_id, reply)
+        
+        Message.objects.create(
+            conversation=conversation,
+            sender=None,
+            message_type='SYSTEM',
+            content=reply,
+            delivery_status='SENT'
+        )
+        
+        
+    def _handle_ai_escalation_decision(self, user, conversation, message_body):
+        msg = message_body.strip().upper()
+
+        if msg == 'YES':
+            conversation.mode = 'CLINICIAN'
+            conversation.status = 'AWAITING_ACCEPTANCE'
+            conversation.save()
+            self._send_welcome_screen(user, conversation)
+
+        elif msg == 'NO':
+            conversation.status = 'AI_CHAT'
+            conversation.save()
+            self.twilio.send_message(
+                user.whatsapp_id,
+                "👍 No problem. You can continue asking general health questions."
+            )
+        else:
+            self.twilio.send_message(user.whatsapp_id, "Please reply *YES* or *NO*.")
 
 
 
@@ -266,7 +359,8 @@ To continue, reply:
         conversation = ConversationSession.objects.filter(
             patient=user,
             status__in=['INITIAL', 'AWAITING_ACCEPTANCE', 'AWAITING_PATIENT_PROFILE',
-                       'AI_TRIAGE_IN_PROGRESS', 'PENDING_PAYMENT', 'PENDING_CLINICIAN_REVIEW', 'DIRECT_MESSAGING']
+                       'AI_TRIAGE_IN_PROGRESS', 'PENDING_PAYMENT', 'PENDING_CLINICIAN_REVIEW', 'DIRECT_MESSAGING', 
+                       'AWAITING_MODE_SELECTION', 'AI_CHAT', 'AI_CHAT_ESCALATION_OFFERED']
         ).first()
         
         if not conversation:

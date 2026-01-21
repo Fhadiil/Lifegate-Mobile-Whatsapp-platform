@@ -6,6 +6,18 @@ from apps.authentication.models import User
 
 class ConversationSession(models.Model):
     """Main conversation session between patient and system/clinician."""
+    MODEL_CHOICES = [
+        ('AI_ONLY', 'AI Only Chat'),
+        ('CLINICIAN', 'Clinician Consultation')
+    ]
+    
+    mode = models.CharField(
+        max_length=50, 
+        choices=MODEL_CHOICES, 
+        default='CLINICIAN',
+        db_index=True
+    )
+    
     
     STATUS_CHOICES = [
         ('INITIAL', 'Initial'),
@@ -60,8 +72,6 @@ class ConversationSession(models.Model):
 
 
 class Message(models.Model):
-    """Messages in a conversation."""
-    
     MESSAGE_TYPE_CHOICES = [
         ('PATIENT', 'Patient Message'),
         ('AI_QUERY', 'AI Question'),
@@ -79,25 +89,38 @@ class Message(models.Model):
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
     conversation = models.ForeignKey(
-        ConversationSession, on_delete=models.CASCADE, related_name='messages'
+        ConversationSession,
+        on_delete=models.CASCADE,
+        related_name='messages'
     )
-    sender = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='sent_messages')
-    message_type = models.CharField(max_length=20, choices=MESSAGE_TYPE_CHOICES)
+    
+    sender = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='sent_messages'
+    )
+    
+    message_type = models.CharField(
+        max_length=20,
+        choices=MESSAGE_TYPE_CHOICES
+    )
+    
     content = models.TextField()
     
-    # Thatguysenpai added THESE
-    #media_url = models.URLField(blank=True, null=True)
-    media_type = models.CharField(max_length=50, blank=True, null=True)
-
-    delivery_status = models.CharField(max_length=20, default="DELIVERED")
-    created_at = models.DateTimeField(auto_now_add=True)
     media_url = models.URLField(blank=True, null=True)
+    media_type = models.CharField(max_length=50, blank=True, null=True)
+    
     delivery_status = models.CharField(
-        max_length=20, choices=DELIVERY_STATUS_CHOICES, default='PENDING'
+        max_length=20,
+        choices=DELIVERY_STATUS_CHOICES,
+        default='PENDING'
     )
     
     twilio_message_sid = models.CharField(max_length=100, blank=True)
+    
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     delivered_at = models.DateTimeField(null=True, blank=True)
     read_at = models.DateTimeField(null=True, blank=True)
@@ -109,6 +132,7 @@ class Message(models.Model):
             models.Index(fields=['conversation', 'created_at']),
             models.Index(fields=['sender', 'created_at']),
         ]
+
     
     def __str__(self):
         return f"Message from {self.sender.phone_number if self.sender else 'System'} - {self.created_at}"

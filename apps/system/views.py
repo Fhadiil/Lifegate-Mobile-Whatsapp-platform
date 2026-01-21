@@ -31,14 +31,6 @@ class TwilioWebhookView(APIView):
         try:
             logger.info("[WEBHOOK] Received message from Twilio")
             
-            if settings.DEBUG:
-                is_valid = True
-            else:
-                is_valid = twilio.validate_request(request_url, request.POST, signature)
-
-            if not is_valid:
-                return Response({'error': 'Invalid signature'}, status=401)
-            
             # Step 1: Validate Twilio signature
             twilio = TwilioClient()
             request_url = request.build_absolute_uri()
@@ -50,6 +42,14 @@ class TwilioWebhookView(APIView):
             #         {'status': 'error', 'message': 'Invalid signature'},
             #         status=status.HTTP_401_UNAUTHORIZED
             #     )
+            
+            if settings.DEBUG:
+                is_valid = True
+            else:
+                is_valid = twilio.validate_request(request_url, request.POST, signature)
+
+            if not is_valid:
+                return Response({'error': 'Invalid signature'}, status=401)
             
             logger.info("[WEBHOOK] Signature validated")
             
@@ -110,7 +110,7 @@ class TwilioWebhookView(APIView):
                 )
         
         except Exception as e:
-            print(f"[WEBHOOK] Exception: {str(e)}", exc_info=True)
+            logger.exception(f"[WEBHOOK] Exception: {str(e)}", exc_info=True)
             return Response(
                 {'status': 'error', 'message': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
