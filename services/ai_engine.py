@@ -1,281 +1,341 @@
-import json
+# services/ai_engine.py
 import logging
-from datetime import datetime
-from django.conf import settings
+import json
 from services.groq_service import GroqService
-from services.fallback_service import FallbackService
 
 logger = logging.getLogger('lifegate')
 
 
 class AIEngine:
-    """Main AI engine for triage and assessment generation."""
+    """AI Engine for medical triage and assessment generation."""
     
     def __init__(self):
         self.groq = GroqService()
-        self.fallback = FallbackService()
     
     def generate_first_question(self, age, gender, chief_complaint):
         """
-        Generate first contextual triage question.
+        Generate the first triage question based on chief complaint.
         
         Args:
             age: Patient age
             gender: Patient gender
-            chief_complaint: Chief complaint
+            chief_complaint: Patient's main symptom/concern
         
         Returns:
             str: First triage question
         """
-        # Only respond to medical complaints
-        if not self._is_medical_text(chief_complaint):
-            logger.info("AIEngine: chief_complaint not medical, skipping first question")
-            return None
+        
+        system_prompt = """You are a medical triage AI assistant. Generate a focused follow-up question to understand the patient's symptoms better.
 
-        system_prompt = """You are a medical triage AI assistant. Generate ONE specific, 
-        realistic follow-up question to better understand the patient's symptoms. 
-        Keep the question under 150 characters. Be empathetic and professional."""
-        
-        user_prompt = f"""
-        Patient Age: {age}
-        Patient Gender: {gender}
-        Chief Complaint: {chief_complaint}
-        
-        Generate ONE clarifying question to understand their symptoms better.
-        """
-        
+Rules:
+- Ask ONE specific question
+- Focus on symptom details (onset, duration, severity, location)
+- Keep it conversational and empathetic
+- No more than 20 words
+- Don't diagnose"""
+
+        user_prompt = f"""Patient: {gender}, Age {age}
+Chief Complaint: {chief_complaint}
+
+Generate the first follow-up question to understand their symptoms better."""
+
         try:
-            response = self.groq.call_api(system_prompt, user_prompt, max_tokens=100)
-            return response.strip()
+            response = self.groq.client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=100
+            )
+            
+            question = response.choices[0].message.content.strip()
+            return question
+            
         except Exception as e:
-            print(f"Error generating first question: {str(e)}")
-            return self.fallback.get_first_question(chief_complaint)
+            logger.error(f"Error generating first question: {e}")
+            return "Can you tell me more about when this started and how severe it is?"
     
     def generate_next_question(self, conversation, current_response):
         """
-        Generate next contextual triage question.
+        Generate next triage question based on conversation history.
         
         Args:
             conversation: ConversationSession object
-            current_response: Patient's response to last question
+            current_response: Patient's latest response
         
         Returns:
             str: Next triage question
         """
-        # Build conversation history
-        qa_pairs = []
-        questions = conversation.triage_questions.all().order_by('question_order')
         
-        for q in questions:
-            if q.patient_response:
-                qa_pairs.append({
-                    'question': q.question_text,
-                    'response': q.patient_response
-                })
+        # Get all previous Q&A pairs
+        triage_history = conversation.triage_questions.filter(
+            response_processed=True
+        ).order_by('question_order')
         
-        # Only continue if conversation seems medical
-        if not self._is_medical_text(conversation.chief_complaint) and not self._is_medical_text(current_response):
-            logger.info("AIEngine: conversation not medical, skipping next question")
-            return None
+        history_text = f"Chief Complaint: {conversation.chief_complaint}\n\n"
+        
+        for triage in triage_history:
+            history_text += f"Q: {triage.question_text}\n"
+            history_text += f"A: {triage.patient_response}\n\n"
+        
+        system_prompt = """You are a medical triage AI. Generate the next logical question to complete the assessment.
 
-        system_prompt = """You are a medical triage AI. Generate ONE specific, 
-        context-aware follow-up question based on the patient's responses. 
-        Consider what you've learned so far. Keep under 150 characters."""
-        
-        user_prompt = f"""
-        Patient Age: {conversation.patient.patient_profile.age}
-        Patient Gender: {conversation.patient.patient_profile.gender}
-        Chief Complaint: {conversation.chief_complaint}
-        
-        Previous Q&A:
-        {json.dumps(qa_pairs, indent=2)}
-        
-        Last Response: {current_response}
-        
-        Generate ONE clarifying follow-up question. Be specific and context-aware.
-        """
-        
+Focus on:
+- Associated symptoms
+- Risk factors
+- Previous medical history
+- Medication use
+- Red flags
+
+Keep questions conversational, empathetic, and under 20 words."""
+
+        user_prompt = f"""Triage History:
+{history_text}
+
+Latest Answer: {current_response}
+
+Generate the next important question to complete the assessment."""
+
         try:
-            response = self.groq.call_api(system_prompt, user_prompt, max_tokens=100)
-            return response.strip()
+            response = self.groq.client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=100
+            )
+            
+            question = response.choices[0].message.content.strip()
+            return question
+            
         except Exception as e:
-            print(f"Error generating next question: {str(e)}")
-            return self.fallback.get_next_question()
+            logger.error(f"Error generating next question: {e}")
+            return "Is there anything else about your symptoms you'd like to share?"
     
     def generate_assessment(self, conversation):
         """
-        Generate structured clinical assessment from triage data.
+        Generate comprehensive medical assessment from triage data.
         
         Args:
-            conversation: ConversationSession with all triage data
+            conversation: ConversationSession object
         
         Returns:
-            dict: Structured assessment JSON
+            dict: Structured assessment data
         """
-        # Gather all Q&A
-        qa_data = []
-        for q in conversation.triage_questions.all():
-            qa_data.append({
-                'question': q.question_text,
-                'response': q.patient_response
-            })
         
-        profile = conversation.patient.patient_profile
+        # Compile triage data
+        triage_data = f"Patient: {conversation.patient.patient_profile.gender}, Age {conversation.patient.patient_profile.age}\n"
+        triage_data += f"Chief Complaint: {conversation.chief_complaint}\n\n"
+        triage_data += "Triage Questions & Answers:\n"
         
-        # Ensure this conversation is medical before generating an assessment
-        if not self._is_medical_text(conversation.chief_complaint):
-            logger.info("AIEngine: conversation chief_complaint not medical, skipping assessment generation")
-            return None
+        for triage in conversation.triage_questions.filter(response_processed=True).order_by('question_order'):
+            triage_data += f"Q: {triage.question_text}\n"
+            triage_data += f"A: {triage.patient_response}\n\n"
+        
+        system_prompt = """You are a medical AI assistant generating structured clinical assessments for physician review.
 
-        system_prompt = """You are a medical AI assistant generating a clinical assessment.
-        Output ONLY valid JSON with NO markdown, NO explanations, NO code blocks.
-        The JSON must be valid and parseable."""
+Generate a comprehensive JSON assessment with this EXACT structure:
+{
+    "symptoms_overview": {
+        "primary_symptoms": ["symptom1", "symptom2"],
+        "severity_rating": 5,
+        "duration": "3 days"
+    },
+    "key_observations": {
+        "likely_condition": "Condition name",
+        "differential_diagnoses": ["option1", "option2"],
+        "notes": "Clinical observations"
+    },
+    "preliminary_recommendations": {
+        "lifestyle_changes": ["recommendation1", "recommendation2"]
+    },
+    "otc_suggestions": {
+        "medications": [
+            {"name": "Medicine", "dosage": "500mg", "frequency": "twice daily"}
+        ]
+    },
+    "monitoring_advice": {
+        "what_to_monitor": ["sign1", "sign2"],
+        "when_to_seek_help": ["warning1", "warning2"]
+    },
+    "red_flags_detected": [],
+    "confidence_score": 0.8
+}
+
+CRITICAL: Return ONLY valid JSON. No markdown, no explanations."""
+
+        try:
+            response = self.groq.client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": triage_data}
+                ],
+                temperature=0.3,
+                max_tokens=1500
+            )
+            
+            raw_output = response.choices[0].message.content.strip()
+            
+            # Clean response (remove markdown if present)
+            if raw_output.startswith('```'):
+                raw_output = raw_output.split('```')[1]
+                if raw_output.startswith('json'):
+                    raw_output = raw_output[4:]
+            
+            assessment_data = json.loads(raw_output)
+            
+            return assessment_data
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error: {e}")
+            logger.error(f"Raw output: {raw_output}")
+            
+            # Return safe fallback
+            return {
+                "symptoms_overview": {
+                    "primary_symptoms": [conversation.chief_complaint],
+                    "severity_rating": 5,
+                    "duration": "Unknown"
+                },
+                "key_observations": {
+                    "likely_condition": "Assessment pending",
+                    "differential_diagnoses": [],
+                    "notes": "Unable to generate full assessment"
+                },
+                "preliminary_recommendations": {
+                    "lifestyle_changes": ["Rest and hydration"]
+                },
+                "otc_suggestions": {
+                    "medications": []
+                },
+                "monitoring_advice": {
+                    "what_to_monitor": ["Symptom progression"],
+                    "when_to_seek_help": ["If symptoms worsen"]
+                },
+                "red_flags_detected": [],
+                "confidence_score": 0.5
+            }
+            
+        except Exception as e:
+            logger.error(f"Error generating assessment: {e}")
+            raise
+    
+    # ==================== NEW METHOD FOR AI-ONLY MODE ====================
+    
+    def generate_ai_only_response(self, conversation, user_message):
+        """
+        Generate educational, non-diagnostic response for AI-only mode.
         
-        user_prompt = f"""
-        Generate a clinical assessment JSON for:
+        CRITICAL SAFETY RULES:
+        - Never diagnose conditions
+        - Never prescribe medications
+        - Never give specific medical advice
+        - Only provide general health education
         
-        Age: {profile.age}
-        Gender: {profile.gender}
-        Chief Complaint: {conversation.chief_complaint}
+        Args:
+            conversation: ConversationSession object
+            user_message: User's current message
         
-        Triage Q&A:
-        {json.dumps(qa_data, indent=2)}
-        
-        Return ONLY this JSON structure:
-        {{
-            "symptoms_overview": {{
-                "primary_symptoms": ["symptom1", "symptom2"],
-                "secondary_symptoms": ["symptom"],
-                "severity_rating": 1-10,
-                "duration": "string",
-                "onset": "sudden/gradual",
-                "triggers": ["trigger1"]
-            }},
-            "key_observations": {{
-                "likely_condition": "string",
-                "risk_factors": ["factor1"],
-                "notes": "string"
-            }},
-            "preliminary_recommendations": {{
-                "lifestyle_changes": ["change1", "change2"],
-                "monitoring": ["item1"],
-                "activities_to_avoid": ["activity1"]
-            }},
-            "otc_suggestions": {{
-                "medications": [
-                    {{
-                        "name": "med_name",
-                        "dosage": "dose_string",
-                        "frequency": "freq_string",
-                        "notes": "string"
-                    }}
-                ]
-            }},
-            "monitoring_advice": {{
-                "what_to_monitor": ["item1"],
-                "frequency": "daily/weekly",
-                "when_to_seek_help": ["condition1"]
-            }},
-            "red_flags_detected": [],
-            "confidence_score": 0.85,
-            "notes_for_clinician": "string"
-        }}
+        Returns:
+            str: Safe, educational AI response
         """
         
+        # Get conversation history (last 10 messages)
+        messages = conversation.messages.filter(
+            message_type__in=['PATIENT', 'AI_RESPONSE']
+        ).order_by('created_at')[:10]
+        
+        history = []
+        for msg in messages:
+            role = 'user' if msg.message_type == 'PATIENT' else 'assistant'
+            history.append({"role": role, "content": msg.content})
+        
+        # Add current message
+        history.append({"role": "user", "content": user_message})
+        
+        # CRITICAL SYSTEM PROMPT - Enforces safety boundaries
+        system_prompt = """You are a health education AI assistant. You are NOT a doctor and cannot diagnose or prescribe.
+
+STRICT RULES YOU MUST FOLLOW:
+1. NEVER diagnose conditions (don't say "You have...", "This is...", "It sounds like...")
+2. NEVER prescribe medications or treatments
+3. NEVER give specific medical advice ("You should...", "Take...", "Do...")
+4. ONLY answer health and medical questions - politely decline non-medical topics
+5. If asked for diagnosis/prescription/specific advice, respond: "I can't provide that - you'd need a licensed clinician for diagnosis or treatment recommendations."
+
+WHAT YOU CAN DO:
+✅ Explain medical terms in simple language
+✅ Provide general wellness information  
+✅ Discuss symptoms in educational context (e.g., "Colds typically cause...")
+✅ Suggest when to see a doctor based on severity
+✅ Share general health tips
+
+WHAT YOU CANNOT DO:
+❌ Answer questions about celebrities, entertainment, sports, politics, etc.
+❌ Diagnose or prescribe
+❌ Give specific treatment advice
+
+IF ASKED NON-MEDICAL QUESTIONS:
+Respond: "I'm a health assistant and can only help with medical and health-related questions. Is there anything about your health I can help with?"
+
+TONE & STYLE:
+- Conversational, warm, and empathetic
+- Keep responses under 150 words
+- Use simple language
+- Be helpful without overstepping boundaries
+
+EXAMPLES:
+❌ BAD: "You have a sinus infection. Take amoxicillin 500mg."
+✅ GOOD: "Those symptoms could be related to several things. A doctor can properly assess and recommend treatment if needed."
+
+❌ BAD: "This sounds like COVID. You should isolate."
+✅ GOOD: "If you're concerned about respiratory symptoms, it's best to consult a healthcare provider who can test and advise."
+
+❌ BAD: "Demi Lovato is a singer..."
+✅ GOOD: "I'm a health assistant and can only help with medical questions. Is there anything about your health I can help with?"
+
+Remember: Your role is to educate and guide on HEALTH topics only, NOT to diagnose or treat."""
+
         try:
-            response = self.groq.call_api(system_prompt, user_prompt, max_tokens=1500)
-            assessment = self._parse_json_response(response)
+            response = self.groq.client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    *history
+                ],
+                temperature=0.7,
+                max_tokens=300
+            )
             
-            if not assessment:
-                assessment = self.fallback.get_assessment(
-                    chief_complaint=conversation.chief_complaint,
-                    profile=profile
+            ai_response = response.choices[0].message.content.strip()
+            
+            # SAFETY CHECK: Scan for prohibited diagnostic language
+            diagnostic_patterns = [
+                'you have', 'you might have', 'this is', 'sounds like you have',
+                'diagnosis', 'you should take', 'i recommend taking', 'take this medication',
+                'you need to take', 'prescribed', 'prescription'
+            ]
+            
+            response_lower = ai_response.lower()
+            
+            # If AI violated rules, override with safe response
+            if any(pattern in response_lower for pattern in diagnostic_patterns):
+                logger.warning(f"AI-only response violated safety rules. Overriding.")
+                ai_response = (
+                    "I can't provide diagnosis or specific medical advice - "
+                    "that requires a licensed clinician. If you'd like professional "
+                    "assessment, I can connect you with a doctor. Otherwise, I'm happy "
+                    "to discuss general health information. What would you like to know?"
                 )
             
-            return assessment
-        
-        except Exception as e:
-            print(f"Error generating assessment: {str(e)}")
-            return self.fallback.get_assessment(
-                chief_complaint=conversation.chief_complaint,
-                profile=profile
-            )
-    
-    def detect_red_flags(self, text):
-        """
-        Detect emergency red flags in text.
-        
-        Args:
-            text: Patient message text
-        
-        Returns:
-            list: Detected red flags
-        """
-        text_lower = text.lower()
-        red_flags = []
-        
-        for keyword in settings.RED_FLAG_KEYWORDS:
-            if keyword in text_lower:
-                red_flags.append(keyword)
-        
-        return red_flags
-
-    def _is_medical_text(self, text):
-        """Return True if `text` appears medical in nature.
-
-        Uses a configurable list in `settings.MEDICAL_KEYWORDS` if available,
-        otherwise falls back to a conservative built-in list. The check is a
-        simple keyword match (case-insensitive)."""
-        try:
-            if not text or not isinstance(text, str):
-                return False
-
-            text_lower = text.lower()
-
-            # Use configured medical keywords when available
-            keywords = getattr(settings, 'MEDICAL_KEYWORDS', None)
-            if not keywords:
-                keywords = [
-                    'pain', 'fever', 'cough', 'headache', 'nausea', 'vomit', 'vomiting',
-                    'bleeding', 'shortness of breath', 'breath', 'dizzy', 'dizziness',
-                    'allergy', 'rash', 'swelling', 'infection', 'temperature', 'antibiotic',
-                    'fracture', 'injury', 'chest pain', 'abdominal', 'diarrhea', 'constipation',
-                    'pregnant', 'pregnancy', 'labor', 'seizure', 'stroke', 'suicide', 'suicidal'
-                ]
-
-            # If any keyword appears, treat as medical
-            for kw in keywords:
-                if kw in text_lower:
-                    return True
-
-            # Also consider presence of numeric vitals patterns (e.g., 'bp', 'bpm', '°c')
-            vitals_tokens = ['bp', 'bpm', 'mmhg', '°c', 'celsius', 'temperature', 'pulse']
-            for t in vitals_tokens:
-                if t in text_lower:
-                    return True
-
-            return False
-        except Exception:
-            return False
-    
-    def _parse_json_response(self, response):
-        """
-        Parse JSON from AI response, handling markdown wrappers.
-        
-        Args:
-            response: AI response text
-        
-        Returns:
-            dict: Parsed JSON or None
-        """
-        try:
-            # Remove markdown code blocks if present
-            if '```json' in response:
-                response = response.split('```json')[1].split('```')[0]
-            elif '```' in response:
-                response = response.split('```')[1].split('```')[0]
+            return ai_response
             
-            return json.loads(response.strip())
-        except (json.JSONDecodeError, IndexError) as e:
-            print(f"Error parsing JSON response: {str(e)}")
-            return None
+        except Exception as e:
+            logger.error(f"AI-only response error: {e}")
+            # Safe fallback response
+            return "I'm having trouble right now. Could you try rephrasing your question?"

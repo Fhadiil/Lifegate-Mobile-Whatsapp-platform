@@ -6,22 +6,19 @@ from apps.authentication.models import User
 
 class ConversationSession(models.Model):
     """Main conversation session between patient and system/clinician."""
-    MODEL_CHOICES = [
+    
+    MODE_CHOICES = [
+        ('UNDECIDED', 'Mode Not Selected'),
         ('AI_ONLY', 'AI Only Chat'),
         ('CLINICIAN', 'Clinician Consultation')
     ]
     
-    mode = models.CharField(
-        max_length=50, 
-        choices=MODEL_CHOICES, 
-        default='CLINICIAN',
-        db_index=True
-    )
-    
-    
     STATUS_CHOICES = [
         ('INITIAL', 'Initial'),
         ('AWAITING_ACCEPTANCE', 'Awaiting User Agreement'),
+        ('MODE_SELECTION', 'Choosing AI or Clinician'),
+        ('AI_ONLY_ACTIVE', 'AI Only - Active Chat'),
+        ('ESCALATION_CONSENT', 'Requesting Clinician Consent'),
         ('AWAITING_PATIENT_PROFILE', 'Awaiting Profile Info'),
         ('AI_TRIAGE_IN_PROGRESS', 'AI Triage In Progress'),
         ('AI_ASSESSMENT_GENERATED', 'Assessment Generated'),
@@ -29,6 +26,7 @@ class ConversationSession(models.Model):
         ('CLINICIAN_OVERRIDE', 'Clinician Override'),
         ('AWAITING_PATIENT_RESPONSE', 'Awaiting Patient Response'),
         ('DIRECT_MESSAGING', 'Direct Messaging'),
+        ('COMPLETED', 'Completed'),
         ('CLOSED', 'Closed'),
         ('ESCALATED', 'Escalated'),
     ]
@@ -39,14 +37,23 @@ class ConversationSession(models.Model):
         User, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='assigned_conversations', limit_choices_to={'role': 'CLINICIAN'}
     )
+    
+    mode = models.CharField(
+        max_length=20, 
+        choices=MODE_CHOICES, 
+        default='UNDECIDED',
+        db_index=True
+    )
+    
     status = models.CharField(
         max_length=30, choices=STATUS_CHOICES, default='INITIAL',
         db_index=True
     )
+    
     chief_complaint = models.TextField(blank=True)
     is_escalated = models.BooleanField(default=False)
     escalation_reason = models.CharField(max_length=200, blank=True)
-    ai_questions_asked = models.IntegerField(default=0, validators=[])
+    ai_questions_asked = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     triage_completed_at = models.DateTimeField(null=True, blank=True)
     clinician_assigned_at = models.DateTimeField(null=True, blank=True)
@@ -61,6 +68,7 @@ class ConversationSession(models.Model):
             models.Index(fields=['patient', 'status']),
             models.Index(fields=['assigned_clinician', 'status']),
             models.Index(fields=['is_escalated']),
+            models.Index(fields=['mode']),
         ]
     
     def __str__(self):
@@ -68,13 +76,14 @@ class ConversationSession(models.Model):
     
     def is_active(self):
         """Check if conversation is still active."""
-        return self.status not in ['CLOSED', 'ESCALATED']
+        return self.status not in ['CLOSED', 'ESCALATED', 'COMPLETED']
 
 
 class Message(models.Model):
     MESSAGE_TYPE_CHOICES = [
         ('PATIENT', 'Patient Message'),
         ('AI_QUERY', 'AI Question'),
+        ('AI_RESPONSE', 'AI Response'),
         ('SYSTEM', 'System Message'),
         ('CLINICIAN', 'Clinician Response'),
         ('ESCALATION_ALERT', 'Escalation Alert'),
@@ -154,7 +163,7 @@ class TriageQuestion(models.Model):
     )
     question_text = models.TextField()
     question_type = models.CharField(max_length=20, choices=QUESTION_TYPE_CHOICES)
-    question_order = models.IntegerField(validators=[])
+    question_order = models.IntegerField()
     patient_response = models.TextField(blank=True)
     response_timestamp = models.DateTimeField(null=True, blank=True)
     response_processed = models.BooleanField(default=False)
